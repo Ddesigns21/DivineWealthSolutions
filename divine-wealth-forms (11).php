@@ -5114,7 +5114,7 @@ private function render_admin_payout_request_detail( $id ) {
 
     // Use the actual table name you confirmed:
     $table   = $wpdb->prefix . 'dw_payout_requests';
-    $members = $wpdb->prefix . 'dw_reward_members';
+    $members = $wpdb->prefix . 'dw_rewards_members';
 
     // On the initial GET of the page, verify the "view" nonce.
     if ( $_SERVER['REQUEST_METHOD'] === 'GET' ) {
