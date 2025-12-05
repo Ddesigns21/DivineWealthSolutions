@@ -58,6 +58,7 @@ class Divine_Wealth_Forms {
         
         // Admin POST actions (detail page tools)
         add_action( 'admin_post_dw_update_member_tier', array( $this, 'admin_update_member_tier' ) );
+        add_action( 'admin_post_dw_update_member_status', array( $this, 'admin_update_member_status' ) );
         add_action( 'admin_post_dw_update_member_code', array( $this, 'admin_update_member_code' ) );
         add_action( 'admin_post_dw_save_member_admin_notes', array( $this, 'admin_save_member_notes' ) );
         add_action( 'admin_post_dw_reply_member', array( $this, 'admin_reply_member' ) );
@@ -113,13 +114,22 @@ public static function maybe_upgrade_tables() {
 
     // ===== Rewards Members columns =====
     $member_cols = $wpdb->get_col( "DESC {$members_table}", 0 );
-
-    if ( ! in_array( 'admin_notes', $member_cols, true ) ) {
+   if ( ! in_array( 'admin_notes', $member_cols, true ) ) {
         $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN admin_notes TEXT NULL" );
     }
     if ( ! in_array( 'admin_notes_updated_at', $member_cols, true ) ) {
         $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN admin_notes_updated_at DATETIME NULL" );
     }
+    if ( ! in_array( 'status', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'" );
+    }
+    if ( ! in_array( 'status_changed_at', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN status_changed_at DATETIME NULL" );
+    }
+
+    // Ensure existing rows have a status value
+    $wpdb->query( "UPDATE {$members_table} SET status = 'active' WHERE status IS NULL OR status = ''" );
+
 
     // ===== Travel Requests columns =====
     $travel_cols = $wpdb->get_col( "DESC {$travel_table}", 0 );
@@ -164,6 +174,54 @@ public static function maybe_upgrade_tables() {
         }
         if ( ! in_array( 'status_updated_at', $business_cols, true ) ) {
             $wpdb->query( "ALTER TABLE {$business_table} ADD COLUMN status_updated_at DATETIME NULL" );
+        }
+    }
+
+    // ===== Payout Requests columns =====
+    $payout_table = null;
+    $candidates   = array(
+        $wpdb->prefix . 'dw_payout_requests',
+        $wpdb->prefix . 'dw_payout_request',
+        $wpdb->prefix . 'dw_payouts',
+    );
+
+    foreach ( $candidates as $tbl ) {
+        $found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $tbl ) );
+        if ( $found === $tbl ) {
+            $payout_table = $tbl;
+            break;
+        }
+    }
+
+    if ( $payout_table ) {
+        $payout_cols = $wpdb->get_col( "DESC {$payout_table}", 0 );
+
+        if ( ! in_array( 'request_type', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN request_type VARCHAR(20) NOT NULL DEFAULT 'cash'" );
+        }
+
+        if ( ! in_array( 'payout_method', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN payout_method VARCHAR(20) NOT NULL DEFAULT 'cashapp'" );
+        }
+
+        if ( ! in_array( 'payout_details', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN payout_details TEXT NULL" );
+        }
+
+        if ( ! in_array( 'admin_notes', $payout_cols, true ) && in_array( 'notes', $payout_cols, true ) ) {
+            // Reuse the existing notes column if present.
+            $wpdb->query( "ALTER TABLE {$payout_table} CHANGE notes admin_notes TEXT NULL" );
+        } elseif ( ! in_array( 'admin_notes', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN admin_notes TEXT NULL" );
+        }
+
+        if ( ! in_array( 'paid_at', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN paid_at DATETIME NULL" );
+        }
+
+        if ( ! in_array( 'updated_at', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN updated_at DATETIME NULL" );
+            $wpdb->query( "UPDATE {$payout_table} SET updated_at = created_at WHERE updated_at IS NULL" );
         }
     }
 
@@ -293,6 +351,7 @@ private function maybe_create_payout_table() {
     $members_table  = $wpdb->prefix . 'dw_rewards_members';
     $travel_table   = $wpdb->prefix . 'dw_travel_requests';
     $business_table = $wpdb->prefix . 'dw_business_perks_requests';
+    $payout_table   = $this->get_payout_table_name();
     $logs_table     = $wpdb->prefix . 'dw_referral_logs';
 
     $sql = "";
@@ -308,6 +367,8 @@ private function maybe_create_payout_table() {
         referral_type VARCHAR(50) NULL,
         referral_code VARCHAR(50) NOT NULL,
         tier VARCHAR(20) NOT NULL DEFAULT 'concierge',
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
+        status_changed_at DATETIME NULL,
         city VARCHAR(190) NULL,
         state VARCHAR(50) NULL,
         notes TEXT NULL,
@@ -472,37 +533,34 @@ private function maybe_create_payout_table() {
     }
 
 /**
- * Try to detect which payouts table actually exists in the DB,
- * and return that table name so both front-end and admin
- * use the same one.
- */
+     * Try to detect which payouts table actually exists in the DB,
+     * and return that table name so both front-end and admin
+     * use the same one.
+     */
     private function get_payout_table_name() {
-    global $wpdb;
-    
-    //return 'wpdw_dw_payout_requests';
-    return $wpdb->prefix . 'dw_payout_requests';
+        global $wpdb;
 
-    // Candidate table names we might have used
-    $candidates = array(
-        $wpdb->prefix . 'dw_payout_requests',
-        $wpdb->prefix . 'dw_payout_request',
-        $wpdb->prefix . 'dw_payouts',
-    );
-
-    foreach ( $candidates as $tbl ) {
-        $found = $wpdb->get_var(
-            // SHOW TABLES LIKE returns the table name if it exists
-            $wpdb->prepare( "SHOW TABLES LIKE %s", $tbl )
+        // Candidate table names we might have used
+        $candidates = array(
+            $wpdb->prefix . 'dw_payout_requests',
+            $wpdb->prefix . 'dw_payout_request',
+            $wpdb->prefix . 'dw_payouts',
         );
 
-        if ( $found === $tbl ) {
-            return $tbl;
-        }
-    }
+        foreach ( $candidates as $tbl ) {
+            $found = $wpdb->get_var(
+                // SHOW TABLES LIKE returns the table name if it exists
+                $wpdb->prepare( "SHOW TABLES LIKE %s", $tbl )
+            );
 
-    // Fallback: our current default
-    return $candidates[0];
-}
+            if ( $found === $tbl ) {
+                return $tbl;
+            }
+        }
+
+        // Default fallback
+        return $wpdb->prefix . 'dw_payout_requests';
+    }
 
 
     /**
@@ -731,6 +789,8 @@ private function get_email_headers() {
                 'source'        => 'form',
                 'ip_address'    => $ip,
                 'user_agent'    => $ua,
+                'status'        => 'active',
+                'status_changed_at' => current_time( 'mysql' ),
             )
         );
 
@@ -2065,7 +2125,16 @@ public function render_tier_perks_table() {
     $total_business = $business_exists
         ? (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$business_table}" )
         : 0;
+     $payout_table_exists = $wpdb->get_var(
+        $wpdb->prepare( "SHOW TABLES LIKE %s", $payout_table )
+    );
+    $new_payouts     = 0;
+    $pending_payouts = 0;
 
+    if ( $payout_table_exists ) {
+        $new_payouts     = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$payout_table} WHERE status = 'new'" );
+        $pending_payouts = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$payout_table} WHERE status = 'pending'" );
+    }
     // Tier breakdown
     $tiers = array(
         'concierge' => 0,
@@ -2177,12 +2246,18 @@ public function render_tier_perks_table() {
         <p><strong>Total Business Perks Requests:</strong> <?php echo esc_html( $total_business ); ?></p>
         <p>Linked to a Rewards code: <?php echo esc_html( $linked_business ); ?></p>
 
-        <?php if ( $referral_table_found ) : ?>
+            <?php if ( $referral_table_found ) : ?>
             <hr style="margin:10px 0;">
 
             <p><strong>Total Referrals Logged:</strong> <?php echo esc_html( $total_referrals ); ?></p>
             <p>Pending referrals: <?php echo esc_html( $pending_referrals ); ?></p>
             <p>Closed referrals: <?php echo esc_html( $closed_referrals ); ?></p>
+        <?php endif; ?>
+
+        <?php if ( $payout_table_exists ) : ?>
+            <hr style="margin:10px 0;">
+            <p><strong>New payout requests:</strong> <?php echo esc_html( $new_payouts ); ?></p>
+            <p><strong>Pending payout requests:</strong> <?php echo esc_html( $pending_payouts ); ?></p>
         <?php endif; ?>
     </div>
     <?php
@@ -2728,16 +2803,24 @@ public function admin_save_email_settings() {
     private function admin_get_search() {
         return isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '';
     }
-
     private function admin_pagination( $total_items, $per_page, $paged, $page_slug ) {
-        $total_pages = (int) ceil( $total_items / $per_page );
+          $total_pages = (int) ceil( $total_items / $per_page );
         if ( $total_pages <= 1 ) return;
 
         $base_url = admin_url( 'admin.php?page=' . $page_slug );
 
         echo '<div class="tablenav"><div class="tablenav-pages" style="margin:10px 0;">';
         for ( $i = 1; $i <= $total_pages; $i++ ) {
-            $url   = add_query_arg( array( 'paged' => $i, 's' => $this->admin_get_search() ), $base_url );
+            $args = array(
+                'paged' => $i,
+                's'     => $this->admin_get_search(),
+            );
+
+            if ( isset( $_GET['status'] ) ) {
+                $args['status'] = sanitize_key( wp_unslash( $_GET['status'] ) );
+            }
+
+            $url   = add_query_arg( $args, $base_url );
             $class = $i === $paged ? 'button button-primary' : 'button';
             echo '<a class="' . esc_attr( $class ) . '" style="margin-right:6px;" href="' . esc_url( $url ) . '">' . esc_html( $i ) . '</a>';
         }
@@ -2824,11 +2907,20 @@ private function render_admin_rewards_member_detail( $id ) {
         $wpdb->prepare( "SELECT * FROM {$table} WHERE id=%d LIMIT 1", $id )
     );
         // ---- Email Status Notices (Success / Error) ----
-    if ( isset( $_GET['dw_email_sent'] ) && (int) $_GET['dw_email_sent'] === 1 ) {
+   if ( isset( $_GET['dw_email_sent'] ) && (int) $_GET['dw_email_sent'] === 1 ) {
         echo '<div class="notice notice-success is-dismissible"><p>Email sent to this member successfully.</p></div>';
     }
     elseif ( isset( $_GET['dw_email_error'] ) && (int) $_GET['dw_email_error'] === 1 ) {
         echo '<div class="notice notice-error is-dismissible"><p>There was a problem sending the email. Please try again.</p></div>';
+    }
+
+    if ( isset( $_GET['dw_updated'] ) ) {
+        $updated_field = sanitize_key( wp_unslash( $_GET['dw_updated'] ) );
+        if ( 'status' === $updated_field ) {
+            echo '<div class="notice notice-success is-dismissible"><p>Member status updated.</p></div>';
+        } elseif ( 'tier' === $updated_field ) {
+            echo '<div class="notice notice-success is-dismissible"><p>Member tier updated.</p></div>';
+        }
     }
 
     if ( ! $member ) {
@@ -2840,14 +2932,17 @@ private function render_admin_rewards_member_detail( $id ) {
 
     // Prep action URLs + nonces
     $tier_action_url  = admin_url( 'admin-post.php' );
+    $status_action_url = admin_url( 'admin-post.php' );
     $code_action_url  = admin_url( 'admin-post.php' );
     $notes_action_url = admin_url( 'admin-post.php' );
     $reply_action_url = admin_url( 'admin-post.php' );
 
     $tier_nonce  = wp_create_nonce( 'dw_update_member_tier_' . $id );
+    $status_nonce = wp_create_nonce( 'dw_update_member_status_' . $id );
     $code_nonce  = wp_create_nonce( 'dw_update_member_code_' . $id );
     $notes_nonce = wp_create_nonce( 'dw_save_member_notes_' . $id );
     $reply_nonce = wp_create_nonce( 'dw_reply_member_' . $id );
+    
     $referral_action_url = admin_url( 'admin-post.php' );
     $referral_nonce      = wp_create_nonce( 'dw_add_member_referral_' . $id );
 
@@ -2858,6 +2953,29 @@ private function render_admin_rewards_member_detail( $id ) {
         'platinum'  => 'Platinum Partner',
     );
 
+ $status_labels = array(
+        'active'   => 'Active',
+        'pending'  => 'Pending',
+        'inactive' => 'Inactive',
+        'archived' => 'Archived',
+    );
+
+    $payout_table        = $this->get_payout_table_name();
+    $payout_table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $payout_table ) );
+    $recent_payouts      = array();
+
+    if ( $payout_table_exists ) {
+        $recent_payouts = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT id, amount_requested, request_type, payout_method, status, created_at, updated_at
+                 FROM {$payout_table}
+                 WHERE member_id = %d
+                 ORDER BY created_at DESC
+                 LIMIT 5",
+                $id
+            )
+        );
+    }
     echo '<div class="wrap">';
     echo '<h1>Rewards Member Details</h1>';
     echo '<p><a class="button" href="' . esc_url( $back_url ) . '">&larr; Back to list</a></p>';
@@ -2881,6 +2999,8 @@ private function render_admin_rewards_member_detail( $id ) {
         'business_name'   => 'Business Name',
         'referral_type'   => 'Referral Type',
         'tier'            => 'Tier',
+        'status'          => 'Status',
+        'status_changed_at' => 'Status Updated',
         'city'            => 'City',
         'state'           => 'State',
         'notes'           => 'Notes / Goals',
@@ -2907,7 +3027,51 @@ private function render_admin_rewards_member_detail( $id ) {
     }
     echo '</tbody></table>';
 
-    // C) Update Tier tool
+     // C) Status management
+    $current_status_label = isset( $status_labels[ $member->status ] )
+        ? $status_labels[ $member->status ]
+        : ucfirst( $member->status ?: 'active' );
+    $delete_url = wp_nonce_url(
+        admin_url( 'admin-post.php?action=dw_delete_rewards_member&id=' . $id ),
+        'dw_delete_rewards_member_' . $id
+    );
+
+    echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
+    echo '<h2 style="margin-top:0;">Member Status</h2>';
+    echo '<p style="margin-bottom:10px;">Current status: <strong>' . esc_html( $current_status_label ) . '</strong>';
+    if ( ! empty( $member->status_changed_at ) ) {
+        echo '<br><span style="color:#666;">Updated: ' . esc_html( $member->status_changed_at ) . '</span>';
+    }
+    echo '</p>';
+
+    echo '<form method="post" action="' . esc_url( $status_action_url ) . '" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">';
+    echo '<input type="hidden" name="action" value="dw_update_member_status">';
+    echo '<input type="hidden" name="id" value="' . esc_attr( $id ) . '">';
+    echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $status_nonce ) . '">';
+    echo '<select name="status">';
+    foreach ( $status_labels as $key => $label ) {
+        $selected = selected( $member->status, $key, false );
+        echo '<option value="' . esc_attr( $key ) . '" ' . $selected . '>' . esc_html( $label ) . '</option>';
+    }
+    echo '</select>';
+    echo '<button class="button button-primary">Save Status</button>';
+    echo '</form>';
+
+    echo '<div style="margin-top:10px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">';
+    echo '<form method="post" action="' . esc_url( $status_action_url ) . '" onsubmit="return confirm(\'Archive this member? They will remain in the system but marked archived.\');">';
+    echo '<input type="hidden" name="action" value="dw_update_member_status">';
+    echo '<input type="hidden" name="id" value="' . esc_attr( $id ) . '">';
+    echo '<input type="hidden" name="status" value="archived">';
+    echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $status_nonce ) . '">';
+    echo '<button class="button">Archive Member</button>';
+    echo '</form>';
+
+    echo '<a href="' . esc_url( $delete_url ) . '" class="button-link-delete" onclick="return confirm(\'Permanently delete this member? This cannot be undone.\');">Delete permanently</a>';
+    echo '</div>';
+
+    echo '</div>';
+
+    // D) Update Tier tool
     echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
     echo '<h2 style="margin-top:0;">Update Tier</h2>';
     echo '<form method="post" action="' . esc_url( $tier_action_url ) . '">';
@@ -2939,7 +3103,41 @@ private function render_admin_rewards_member_detail( $id ) {
     echo '</form>';
     echo '</div>';
 
-    // E) Admin notes tool
+    // E) Recent payout history
+    echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
+    echo '<h2 style="margin-top:0;">Payout History</h2>';
+    if ( $payout_table_exists && $recent_payouts ) {
+        echo '<table class="widefat striped" style="margin-top:10px;">';
+        echo '<thead><tr><th>ID</th><th>Requested</th><th>Type</th><th>Method</th><th>Status</th><th>Requested On</th></tr></thead><tbody>';
+        foreach ( $recent_payouts as $payout ) {
+            $status_badge = isset( $status_labels[ $payout->status ] ) ? $status_labels[ $payout->status ] : ucfirst( $payout->status );
+            $badge_color  = '#2271b1';
+            if ( 'pending' === $payout->status ) {
+                $badge_color = '#f0ad4e';
+            } elseif ( 'completed' === $payout->status ) {
+                $badge_color = '#1a8a34';
+            } elseif ( 'archived' === $payout->status ) {
+                $badge_color = '#6c757d';
+            }
+
+            echo '<tr>';
+            echo '<td><a href="' . esc_url( admin_url( 'admin.php?page=dw-payout-requests&action=view&id=' . absint( $payout->id ) ) ) . '">' . esc_html( $payout->id ) . '</a></td>';
+            echo '<td>$' . esc_html( number_format( (float) $payout->amount_requested, 2 ) ) . '</td>';
+            echo '<td>' . esc_html( ucfirst( $payout->request_type ) ) . '</td>';
+            echo '<td>' . esc_html( ucfirst( $payout->payout_method ) ) . '</td>';
+            echo '<td><span style="display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;background:' . esc_attr( $badge_color ) . ';">' . esc_html( $status_badge ) . '</span></td>';
+            echo '<td>' . esc_html( $payout->created_at ) . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+    } elseif ( $payout_table_exists ) {
+        echo '<p>No payout requests yet for this member.</p>';
+    } else {
+        echo '<p>Payout requests table not found yet.</p>';
+    }
+    echo '</div>';
+
+    // F) Admin notes tool
     echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
     echo '<h2 style="margin-top:0;">Internal Admin Notes</h2>';
     echo '<form method="post" action="' . esc_url( $notes_action_url ) . '">';
@@ -3015,10 +3213,19 @@ private function render_admin_rewards_member_detail( $id ) {
     global $wpdb;
 
     $table    = $wpdb->prefix . 'dw_rewards_members';
-    $per_page = 20;
+  $per_page = 20;
     $paged    = $this->admin_get_paged();
     $offset   = ( $paged - 1 ) * $per_page;
     $search   = $this->admin_get_search();
+    $status_filter = isset( $_GET['status'] ) ? sanitize_key( wp_unslash( $_GET['status'] ) ) : '';
+
+    $status_options = array(
+        ''          => 'All Statuses',
+        'active'    => 'Active',
+        'pending'   => 'Pending',
+        'inactive'  => 'Inactive',
+        'archived'  => 'Archived',
+    );
 
     $where  = "1=1";
     $params = array();
@@ -3042,6 +3249,10 @@ private function render_admin_rewards_member_detail( $id ) {
         $like  = '%' . $wpdb->esc_like( $search ) . '%';
         $params = array( $like, $like, $like, $like );
     }
+     if ( $status_filter && isset( $status_options[ $status_filter ] ) ) {
+        $where   .= " AND status = %s";
+        $params[] = $status_filter;
+    }
 
     $total = (int) ( $params
         ? $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE {$where}", $params ) )
@@ -3062,10 +3273,20 @@ private function render_admin_rewards_member_detail( $id ) {
     // ======================
     //  SEARCH FORM
     // ======================
-    echo '<form method="get" style="margin:10px 0;">
+  echo '<form method="get" style="margin:10px 0; display:flex; gap:8px; align-items:center;">
             <input type="hidden" name="page" value="dw-rewards-admin" />
-            <input type="search" name="s" value="' . esc_attr( $search ) . '" placeholder="Search name, business, email, code" />
-            <button class="button">Search</button>
+            <input type="search" name="s" value="' . esc_attr( $search ) . '" placeholder="Search name, business, email, code" />'
+            . '<select name="status" style="min-width:160px;">
+                <option value="">All Statuses</option>';
+    foreach ( $status_options as $key => $label ) {
+        if ( '' === $key ) {
+            continue;
+        }
+        $selected = selected( $status_filter, $key, false );
+        echo '<option value="' . esc_attr( $key ) . '" ' . $selected . '>' . esc_html( $label ) . '</option>';
+    }
+    echo '  </select>
+            <button class="button">Filter</button>
           </form>';
 
     echo '<table class="widefat striped">';
@@ -3077,6 +3298,7 @@ private function render_admin_rewards_member_detail( $id ) {
         <th>Email</th>
         <th>Referral Code</th>
         <th>Tier</th>
+        <th>Status</th>
         <th>Total Referrals</th>
         <th>Total Revenue</th>
         <th>Actions</th>
@@ -3093,10 +3315,10 @@ private function render_admin_rewards_member_detail( $id ) {
             'dw_view_rewards_' . $r->id
         );
 
-        $delete_url = wp_nonce_url(
-            admin_url( 'admin-post.php?action=dw_delete_rewards_member&id=' . $r->id ),
-            'dw_delete_rewards_member_' . $r->id
-        );
+     //   $delete_url = wp_nonce_url(
+       //     admin_url( 'admin-post.php?action=dw_delete_rewards_member&id=' . $r->id ),
+       //     'dw_delete_rewards_member_' . $r->id
+      //  );
 
         $mailto = 'mailto:' . sanitize_email( $r->email );
 
@@ -3113,8 +3335,7 @@ private function render_admin_rewards_member_detail( $id ) {
                 <strong><a href="' . esc_url( $view_url ) . '">' . esc_html( $r->full_name ) . '</a></strong>
                 <div class="row-actions" style="margin-top:4px;">
                     <span class="view"><a href="' . esc_url( $view_url ) . '">View</a> | </span>
-                    <span class="email"><a href="' . esc_url( $mailto ) . '">Email</a> | </span>
-                    <span class="delete"><a href="' . esc_url( $delete_url ) . '" onclick="return confirm(\'Are you sure you want to delete this rewards member? This cannot be undone.\');">Delete</a></span>
+                    <span class="email"><a href="' . esc_url( $mailto ) . '">Email</a></span>
                 </div>
               </td>';
 
@@ -3130,14 +3351,25 @@ private function render_admin_rewards_member_detail( $id ) {
         // Tier
         echo '<td>' . esc_html( ucfirst( $r->tier ) ) . '</td>';
 
+        // Status badge
+        $status_label = isset( $status_options[ $r->status ] ) ? $status_options[ $r->status ] : ucfirst( $r->status ?: 'active' );
+        $badge_color  = '#2271b1';
+        if ( 'pending' === $r->status ) {
+            $badge_color = '#f0ad4e';
+        } elseif ( 'inactive' === $r->status ) {
+            $badge_color = '#999';
+        } elseif ( 'archived' === $r->status ) {
+            $badge_color = '#6c757d';
+        }
+        echo '<td><span style="display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;background:' . esc_attr( $badge_color ) . ';">' . esc_html( $status_label ) . '</span></td>';
+
         // Totals
         echo '<td>' . esc_html( $r->total_referrals ) . '</td>';
         echo '<td>$' . esc_html( number_format( (float) $r->total_revenue, 2 ) ) . '</td>';
 
         // Actions column (button style)
-        echo '<td>
+      echo '<td>
                 <a class="button button-small" href="' . esc_url( $view_url ) . '">View</a>
-                <a class="button button-small" href="' . esc_url( $delete_url ) . '" onclick="return confirm(\'Are you sure you want to delete this rewards member? This cannot be undone.\');">Delete</a>
               </td>';
 
         echo '</tr>';
@@ -3209,6 +3441,56 @@ public function admin_update_member_tier() {
         'dw_view_rewards_' . $id
     );
     $view_url = add_query_arg( 'dw_updated', 'tier', $view_url );
+
+      wp_safe_redirect( $view_url );
+    exit;
+}
+
+/**
+ * Admin: update member status.
+ * Hook: admin_post_dw_update_member_status
+ */
+public function admin_update_member_status() {
+    $this->require_manage_options();
+
+    $id = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+    if ( ! $id ) {
+        wp_die( 'Invalid member ID.' );
+    }
+
+    $nonce_action = 'dw_update_member_status_' . $id;
+    if (
+        empty( $_POST['_wpnonce'] ) ||
+        ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), $nonce_action )
+    ) {
+        wp_die( 'Security check failed.' );
+    }
+
+    $status  = isset( $_POST['status'] ) ? sanitize_key( wp_unslash( $_POST['status'] ) ) : '';
+    $allowed = array( 'active', 'pending', 'inactive', 'archived' );
+    if ( ! in_array( $status, $allowed, true ) ) {
+        wp_die( 'Invalid status selected.' );
+    }
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'dw_rewards_members';
+
+    $wpdb->update(
+        $table,
+        array(
+            'status'            => $status,
+            'status_changed_at' => current_time( 'mysql' ),
+        ),
+        array( 'id' => $id ),
+        array( '%s', '%s' ),
+        array( '%d' )
+    );
+
+    $view_url = wp_nonce_url(
+        admin_url( 'admin.php?page=dw-rewards-admin&action=view&id=' . $id ),
+        'dw_view_rewards_' . $id
+    );
+    $view_url = add_query_arg( 'dw_updated', 'status', $view_url );
 
     wp_safe_redirect( $view_url );
     exit;
@@ -4982,15 +5264,15 @@ private function render_admin_business_request_detail( $id ) {
 }
    
 public function render_admin_payout_requests() {
-    global $wpdb;
+global $wpdb;
 
-$action = $this->admin_get_action();
-$id     = $this->admin_get_id();
+    // If a specific request is being viewed, render the detail page instead.
+    $action = isset( $_GET['action'] ) ? sanitize_text_field( wp_unslash( $_GET['action'] ) ) : '';
+    if ( 'view' === $action ) {
+        $view_id = isset( $_GET['id'] ) ? absint( $_GET['id'] ) : 0;
 
-if ( $action === 'view' && $id ) {
-    $this->render_admin_payout_request_detail( $id );
-    return;
-}
+        return $this->render_admin_payout_request_detail( $view_id );
+    }
 
     // Use the direct table name; this is the table you confirmed has data.
     $table    = $wpdb->prefix . 'dw_payout_requests';
@@ -5111,9 +5393,8 @@ if ( $action === 'view' && $id ) {
 
 private function render_admin_payout_request_detail( $id ) {
     global $wpdb;
-
     // Use the actual table name you confirmed:
-    $table   = $wpdb->prefix . 'dw_payout_requests';
+    $table   = $this->get_payout_table_name();
     $members = $wpdb->prefix . 'dw_rewards_members';
 
     // On the initial GET of the page, verify the "view" nonce.
@@ -5138,6 +5419,12 @@ private function render_admin_payout_request_detail( $id ) {
         return;
     }
 
+    $columns_raw = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", OBJECT_K );
+
+    $status_field = isset( $columns_raw['status'] ) ? 'status' : ( isset( $columns_raw['payout_status'] ) ? 'payout_status' : '' );
+    $notes_field  = isset( $columns_raw['admin_notes'] ) ? 'admin_notes' : ( isset( $columns_raw['notes'] ) ? 'notes' : '' );
+    $paid_at_key  = isset( $columns_raw['paid_at'] ) ? 'paid_at' : ( isset( $columns_raw['paid_date'] ) ? 'paid_date' : '' );
+
     $status_options = array(
         'new'       => 'New',
         'pending'   => 'Pending Verification',
@@ -5152,36 +5439,55 @@ private function render_admin_payout_request_detail( $id ) {
         // Check the UPDATE nonce (different from the view nonce)
         check_admin_referer( 'dw_update_payout_' . $row->id );
 
-        $new_status = isset( $_POST['status'] )
+         $new_status = isset( $_POST['status'] )
             ? sanitize_text_field( wp_unslash( $_POST['status'] ) )
-            : $row->status;
+            : ( $status_field && isset( $row->{$status_field} ) ? $row->{$status_field} : '' );
 
         $notes = isset( $_POST['admin_notes'] )
             ? wp_kses_post( wp_unslash( $_POST['admin_notes'] ) )
-            : $row->admin_notes;
+            : ( $notes_field && isset( $row->{$notes_field} ) ? $row->{$notes_field} : '' );
 
-        $paid_at = $row->paid_at;
+        $paid_at_current = $paid_at_key && isset( $row->{$paid_at_key} ) ? $row->{$paid_at_key} : null;
+        $paid_at         = $paid_at_current;
 
-        // When set to completed for the first time, stamp paid_at
         if ( $new_status === 'completed' && empty( $paid_at ) ) {
             $paid_at = current_time( 'mysql' );
         } elseif ( $new_status !== 'completed' ) {
-            // If you change out of completed, clear the paid_at
             $paid_at = null;
         }
 
-        $wpdb->update(
-            $table,
-            array(
-                'status'      => $new_status,
-                'admin_notes' => $notes,
-                'paid_at'     => $paid_at,
-                'updated_at'  => current_time( 'mysql' ),
-            ),
-            array( 'id' => $row->id ),
-            array( '%s', '%s', '%s', '%s' ),
-            array( '%d' )
-        );
+        $update_data    = array();
+        $update_formats = array();
+
+        if ( $status_field && isset( $columns_raw[ $status_field ] ) ) {
+            $update_data[ $status_field ] = $new_status;
+            $update_formats[]             = '%s';
+        }
+
+        if ( $notes_field && isset( $columns_raw[ $notes_field ] ) ) {
+            $update_data[ $notes_field ] = $notes;
+            $update_formats[]           = '%s';
+        }
+
+        if ( $paid_at_key && isset( $columns_raw[ $paid_at_key ] ) ) {
+            $update_data[ $paid_at_key ] = $paid_at;
+            $update_formats[]            = '%s';
+        }
+
+        if ( isset( $columns_raw['updated_at'] ) ) {
+            $update_data['updated_at'] = current_time( 'mysql' );
+            $update_formats[]          = '%s';
+        }
+
+        if ( $update_data ) {
+            $wpdb->update(
+                $table,
+                $update_data,
+                array( 'id' => $row->id ),
+                $update_formats,
+                array( '%d' )
+            );
+        }
 
         // After saving, redirect back to the same detail page
         // with a fresh "view" nonce and ?updated=1 flag.
@@ -5193,6 +5499,10 @@ private function render_admin_payout_request_detail( $id ) {
         wp_safe_redirect( $detail_url );
         exit;
     }
+
+    $paid_at_value   = $paid_at_key && isset( $row->{$paid_at_key} ) ? $row->{$paid_at_key} : '';
+    $current_status  = $status_field && isset( $row->{$status_field} ) ? $row->{$status_field} : '';
+    $current_notes   = $notes_field && isset( $row->{$notes_field} ) ? $row->{$notes_field} : '';
 
     echo '<div class="wrap"><h1>Payout Request #' . esc_html( $row->id ) . '</h1>';
 
@@ -5237,7 +5547,7 @@ private function render_admin_payout_request_detail( $id ) {
         </tr>
         <tr>
             <th scope="row">Paid At</th>
-            <td><?php echo $row->paid_at ? esc_html( $row->paid_at ) : '—'; ?></td>
+            <td><?php echo $rpaid_at_value ? esc_html( $paid_at_value ) : '—'; ?></td>
         </tr>
         <tr>
             <th scope="row">Current Status</th>
@@ -5254,7 +5564,7 @@ private function render_admin_payout_request_detail( $id ) {
                 <td>
                     <select id="dw_payout_status" name="status">
                         <?php foreach ( $status_options as $value => $label ) : ?>
-                            <option value="<?php echo esc_attr( $value ); ?>" <?php selected( $row->status, $value ); ?>>
+                            <option value="<?php echo esc_attr( $value ); ?>" <?php selected( $current_status, $value ); ?>>
                                 <?php echo esc_html( $label ); ?>
                             </option>
                         <?php endforeach; ?>
