@@ -4984,6 +4984,14 @@ private function render_admin_business_request_detail( $id ) {
 public function render_admin_payout_requests() {
     global $wpdb;
 
+$action = $this->admin_get_action();
+$id     = $this->admin_get_id();
+
+if ( $action === 'view' && $id ) {
+    $this->render_admin_payout_request_detail( $id );
+    return;
+}
+
     // Use the direct table name; this is the table you confirmed has data.
     $table    = $wpdb->prefix . 'dw_payout_requests';
     $per_page = 20;
@@ -5104,21 +5112,16 @@ public function render_admin_payout_requests() {
 private function render_admin_payout_request_detail( $id ) {
     global $wpdb;
 
-    $table   = $this->get_payout_table_name();
+    // Use the actual table name you confirmed:
+    $table   = $wpdb->prefix . 'dw_payout_requests';
     $members = $wpdb->prefix . 'dw_reward_members';
 
-    $id = absint( $id );
-    if ( ! $id ) {
-        echo '<div class="wrap"><h1>Payout Request</h1><p>Request not found.</p></div>';
-        return;
-    }
-
-    // For the initial GET view, validate the "view" nonce.
-    if ( 'POST' !== $_SERVER['REQUEST_METHOD'] ) {
+    // On the initial GET of the page, verify the "view" nonce.
+    if ( $_SERVER['REQUEST_METHOD'] === 'GET' ) {
         check_admin_referer( 'dw_view_payout_' . $id );
     }
 
-    // Fetch the row (join to members for name/email)
+    // Always fetch the row by the ID we're passed in the URL.
     $row = $wpdb->get_row(
         $wpdb->prepare(
             "SELECT p.*, m.full_name, m.email
@@ -5142,8 +5145,11 @@ private function render_admin_payout_request_detail( $id ) {
         'cancelled' => 'Cancelled',
     );
 
-    // If form posted, handle inline update
-    if ( isset( $_POST['dw_update_payout'] ) ) {
+    // -------------------------------------------------
+    // Handle POST updates (status + admin notes)
+    // -------------------------------------------------
+    if ( $_SERVER['REQUEST_METHOD'] === 'POST' && isset( $_POST['dw_update_payout'] ) ) {
+        // Check the UPDATE nonce (different from the view nonce)
         check_admin_referer( 'dw_update_payout_' . $row->id );
 
         $new_status = isset( $_POST['status'] )
@@ -5156,9 +5162,11 @@ private function render_admin_payout_request_detail( $id ) {
 
         $paid_at = $row->paid_at;
 
+        // When set to completed for the first time, stamp paid_at
         if ( $new_status === 'completed' && empty( $paid_at ) ) {
             $paid_at = current_time( 'mysql' );
         } elseif ( $new_status !== 'completed' ) {
+            // If you change out of completed, clear the paid_at
             $paid_at = null;
         }
 
@@ -5168,38 +5176,40 @@ private function render_admin_payout_request_detail( $id ) {
                 'status'      => $new_status,
                 'admin_notes' => $notes,
                 'paid_at'     => $paid_at,
+                'updated_at'  => current_time( 'mysql' ),
             ),
             array( 'id' => $row->id ),
-            array( '%s', '%s', '%s' ),
+            array( '%s', '%s', '%s', '%s' ),
             array( '%d' )
         );
 
-        echo '<div class="notice notice-success is-dismissible"><p>Payout request updated.</p></div>';
-
-        // Re-fetch fresh copy
-        $row = $wpdb->get_row(
-            $wpdb->prepare(
-                "SELECT p.*, m.full_name, m.email
-                 FROM {$table} p
-                 LEFT JOIN {$members} m ON p.member_id = m.id
-                 WHERE p.id = %d
-                 LIMIT 1",
-                $id
-            )
+        // After saving, redirect back to the same detail page
+        // with a fresh "view" nonce and ?updated=1 flag.
+        $detail_url = wp_nonce_url(
+            admin_url( 'admin.php?page=dw-payout-requests&action=view&id=' . $row->id ),
+            'dw_view_payout_' . $row->id
         );
-
-        if ( ! $row ) {
-            echo '<div class="wrap"><h1>Payout Request</h1><p>Request not found after update.</p></div>';
-            return;
-        }
+        $detail_url = add_query_arg( 'updated', '1', $detail_url );
+        wp_safe_redirect( $detail_url );
+        exit;
     }
 
     echo '<div class="wrap"><h1>Payout Request #' . esc_html( $row->id ) . '</h1>';
+
+    // Show success notice after redirect
+    if ( isset( $_GET['updated'] ) ) {
+        echo '<div class="notice notice-success is-dismissible"><p>Payout request updated.</p></div>';
+    }
+
     ?>
     <table class="form-table" role="presentation">
         <tr>
             <th scope="row">Member</th>
             <td><?php echo esc_html( $row->full_name ?: '—' ); ?></td>
+        </tr>
+        <tr>
+            <th scope="row">Email</th>
+            <td><?php echo esc_html( $row->email ?: '—' ); ?></td>
         </tr>
         <tr>
             <th scope="row">Rewards Code</th>
@@ -5228,6 +5238,10 @@ private function render_admin_payout_request_detail( $id ) {
         <tr>
             <th scope="row">Paid At</th>
             <td><?php echo $row->paid_at ? esc_html( $row->paid_at ) : '—'; ?></td>
+        </tr>
+        <tr>
+            <th scope="row">Current Status</th>
+            <td><?php echo esc_html( $status_options[ $row->status ] ?? $row->status ); ?></td>
         </tr>
     </table>
 
@@ -5268,6 +5282,7 @@ private function render_admin_payout_request_detail( $id ) {
         </p>
     </form>
     <?php
+
     echo '</div>';
 }
 
