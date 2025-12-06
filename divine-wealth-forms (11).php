@@ -177,6 +177,54 @@ public static function maybe_upgrade_tables() {
         }
     }
 
+    // ===== Payout Requests columns =====
+    $payout_table = null;
+    $candidates   = array(
+        $wpdb->prefix . 'dw_payout_requests',
+        $wpdb->prefix . 'dw_payout_request',
+        $wpdb->prefix . 'dw_payouts',
+    );
+
+    foreach ( $candidates as $tbl ) {
+        $found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $tbl ) );
+        if ( $found === $tbl ) {
+            $payout_table = $tbl;
+            break;
+        }
+    }
+
+    if ( $payout_table ) {
+        $payout_cols = $wpdb->get_col( "DESC {$payout_table}", 0 );
+
+        if ( ! in_array( 'request_type', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN request_type VARCHAR(20) NOT NULL DEFAULT 'cash'" );
+        }
+
+        if ( ! in_array( 'payout_method', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN payout_method VARCHAR(20) NOT NULL DEFAULT 'cashapp'" );
+        }
+
+        if ( ! in_array( 'payout_details', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN payout_details TEXT NULL" );
+        }
+
+        if ( ! in_array( 'admin_notes', $payout_cols, true ) && in_array( 'notes', $payout_cols, true ) ) {
+            // Reuse the existing notes column if present.
+            $wpdb->query( "ALTER TABLE {$payout_table} CHANGE notes admin_notes TEXT NULL" );
+        } elseif ( ! in_array( 'admin_notes', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN admin_notes TEXT NULL" );
+        }
+
+        if ( ! in_array( 'paid_at', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN paid_at DATETIME NULL" );
+        }
+
+        if ( ! in_array( 'updated_at', $payout_cols, true ) ) {
+            $wpdb->query( "ALTER TABLE {$payout_table} ADD COLUMN updated_at DATETIME NULL" );
+            $wpdb->query( "UPDATE {$payout_table} SET updated_at = created_at WHERE updated_at IS NULL" );
+        }
+    }
+
 }
 
 private function maybe_create_payout_table() {
@@ -484,38 +532,35 @@ private function maybe_create_payout_table() {
         return 'https://divinewealthllc.com/wp-content/uploads/2025/03/Divine-Wealth-Solution-Logo-1.png';
     }
 
-/**
- * Try to detect which payouts table actually exists in the DB,
- * and return that table name so both front-end and admin
- * use the same one.
- */
+    /**
+     * Try to detect which payouts table actually exists in the DB,
+     * and return that table name so both front-end and admin
+     * use the same one.
+     */
     private function get_payout_table_name() {
-    global $wpdb;
-    
-    //return 'wpdw_dw_payout_requests';
-    return $wpdb->prefix . 'dw_payout_requests';
+        global $wpdb;
 
-    // Candidate table names we might have used
-    $candidates = array(
-        $wpdb->prefix . 'dw_payout_requests',
-        $wpdb->prefix . 'dw_payout_request',
-        $wpdb->prefix . 'dw_payouts',
-    );
-
-    foreach ( $candidates as $tbl ) {
-        $found = $wpdb->get_var(
-            // SHOW TABLES LIKE returns the table name if it exists
-            $wpdb->prepare( "SHOW TABLES LIKE %s", $tbl )
+        // Candidate table names we might have used
+        $candidates = array(
+            $wpdb->prefix . 'dw_payout_requests',
+            $wpdb->prefix . 'dw_payout_request',
+            $wpdb->prefix . 'dw_payouts',
         );
 
-        if ( $found === $tbl ) {
-            return $tbl;
-        }
-    }
+        foreach ( $candidates as $tbl ) {
+            $found = $wpdb->get_var(
+                // SHOW TABLES LIKE returns the table name if it exists
+                $wpdb->prepare( "SHOW TABLES LIKE %s", $tbl )
+            );
 
-    // Fallback: our current default
-    return $candidates[0];
-}
+            if ( $found === $tbl ) {
+                return $tbl;
+            }
+        }
+
+        // Default fallback
+        return $wpdb->prefix . 'dw_payout_requests';
+    }
 
 
     /**
@@ -5381,6 +5426,10 @@ private function render_admin_payout_request_detail( $id ) {
 
     $columns_raw = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", OBJECT_K );
 
+    $status_field = isset( $columns_raw['status'] ) ? 'status' : ( isset( $columns_raw['payout_status'] ) ? 'payout_status' : '' );
+    $notes_field  = isset( $columns_raw['admin_notes'] ) ? 'admin_notes' : ( isset( $columns_raw['notes'] ) ? 'notes' : '' );
+    $paid_at_key  = isset( $columns_raw['paid_at'] ) ? 'paid_at' : ( isset( $columns_raw['paid_date'] ) ? 'paid_date' : '' );
+
     $status_options = array(
         'new'       => 'New',
         'pending'   => 'Pending Verification',
@@ -5394,13 +5443,13 @@ private function render_admin_payout_request_detail( $id ) {
 
         $new_status = isset( $_POST['status'] )
             ? sanitize_text_field( wp_unslash( $_POST['status'] ) )
-            : $row->status;
+            : ( $status_field && isset( $row->{$status_field} ) ? $row->{$status_field} : '' );
 
         $notes = isset( $_POST['admin_notes'] )
             ? wp_kses_post( wp_unslash( $_POST['admin_notes'] ) )
-            : $row->admin_notes;
+            : ( $notes_field && isset( $row->{$notes_field} ) ? $row->{$notes_field} : '' );
 
-        $paid_at_current = isset( $row->paid_at ) ? $row->paid_at : null;
+        $paid_at_current = $paid_at_key && isset( $row->{$paid_at_key} ) ? $row->{$paid_at_key} : null;
         $paid_at         = $paid_at_current;
 
         if ( $new_status === 'completed' && empty( $paid_at ) ) {
@@ -5412,19 +5461,19 @@ private function render_admin_payout_request_detail( $id ) {
         $update_data    = array();
         $update_formats = array();
 
-        if ( isset( $columns_raw['status'] ) ) {
-            $update_data['status'] = $new_status;
-            $update_formats[]      = '%s';
+        if ( $status_field && isset( $columns_raw[ $status_field ] ) ) {
+            $update_data[ $status_field ] = $new_status;
+            $update_formats[]             = '%s';
         }
 
-        if ( isset( $columns_raw['admin_notes'] ) ) {
-            $update_data['admin_notes'] = $notes;
+        if ( $notes_field && isset( $columns_raw[ $notes_field ] ) ) {
+            $update_data[ $notes_field ] = $notes;
             $update_formats[]           = '%s';
         }
 
-        if ( isset( $columns_raw['paid_at'] ) ) {
-            $update_data['paid_at'] = $paid_at;
-            $update_formats[]       = '%s';
+        if ( $paid_at_key && isset( $columns_raw[ $paid_at_key ] ) ) {
+            $update_data[ $paid_at_key ] = $paid_at;
+            $update_formats[]            = '%s';
         }
 
         if ( isset( $columns_raw['updated_at'] ) ) {
@@ -5462,7 +5511,9 @@ private function render_admin_payout_request_detail( $id ) {
         }
     }
 
-    $paid_at_value = isset( $row->paid_at ) ? $row->paid_at : '';
+    $paid_at_value   = $paid_at_key && isset( $row->{$paid_at_key} ) ? $row->{$paid_at_key} : '';
+    $current_status  = $status_field && isset( $row->{$status_field} ) ? $row->{$status_field} : '';
+    $current_notes   = $notes_field && isset( $row->{$notes_field} ) ? $row->{$notes_field} : '';
 
     echo '<div class="wrap"><h1>Payout Request #' . esc_html( $row->id ) . '</h1>';
     ?>
@@ -5510,7 +5561,7 @@ private function render_admin_payout_request_detail( $id ) {
                 <td>
                     <select id="dw_payout_status" name="status">
                         <?php foreach ( $status_options as $value => $label ) : ?>
-                            <option value="<?php echo esc_attr( $value ); ?>" <?php selected( $row->status, $value ); ?>>
+                            <option value="<?php echo esc_attr( $value ); ?>" <?php selected( $current_status, $value ); ?>>
                                 <?php echo esc_html( $label ); ?>
                             </option>
                         <?php endforeach; ?>
@@ -5523,7 +5574,7 @@ private function render_admin_payout_request_detail( $id ) {
                     <textarea id="dw_payout_notes"
                               name="admin_notes"
                               rows="5"
-                              class="large-text"><?php echo esc_textarea( $row->admin_notes ); ?></textarea>
+                              class="large-text"><?php echo esc_textarea( $current_notes ); ?></textarea>
                 </td>
             </tr>
         </table>
