@@ -5379,6 +5379,8 @@ private function render_admin_payout_request_detail( $id ) {
         return;
     }
 
+    $columns_raw = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", OBJECT_K );
+
     $status_options = array(
         'new'       => 'New',
         'pending'   => 'Pending Verification',
@@ -5398,7 +5400,8 @@ private function render_admin_payout_request_detail( $id ) {
             ? wp_kses_post( wp_unslash( $_POST['admin_notes'] ) )
             : $row->admin_notes;
 
-        $paid_at = $row->paid_at;
+        $paid_at_current = isset( $row->paid_at ) ? $row->paid_at : null;
+        $paid_at         = $paid_at_current;
 
         if ( $new_status === 'completed' && empty( $paid_at ) ) {
             $paid_at = current_time( 'mysql' );
@@ -5406,17 +5409,38 @@ private function render_admin_payout_request_detail( $id ) {
             $paid_at = null;
         }
 
-        $wpdb->update(
-            $table,
-            array(
-                'status'      => $new_status,
-                'admin_notes' => $notes,
-                'paid_at'     => $paid_at,
-            ),
-            array( 'id' => $row->id ),
-            array( '%s', '%s', '%s' ),
-            array( '%d' )
-        );
+        $update_data    = array();
+        $update_formats = array();
+
+        if ( isset( $columns_raw['status'] ) ) {
+            $update_data['status'] = $new_status;
+            $update_formats[]      = '%s';
+        }
+
+        if ( isset( $columns_raw['admin_notes'] ) ) {
+            $update_data['admin_notes'] = $notes;
+            $update_formats[]           = '%s';
+        }
+
+        if ( isset( $columns_raw['paid_at'] ) ) {
+            $update_data['paid_at'] = $paid_at;
+            $update_formats[]       = '%s';
+        }
+
+        if ( isset( $columns_raw['updated_at'] ) ) {
+            $update_data['updated_at'] = current_time( 'mysql' );
+            $update_formats[]          = '%s';
+        }
+
+        if ( $update_data ) {
+            $wpdb->update(
+                $table,
+                $update_data,
+                array( 'id' => $row->id ),
+                $update_formats,
+                array( '%d' )
+            );
+        }
 
         echo '<div class="notice notice-success is-dismissible"><p>Payout request updated.</p></div>';
 
@@ -5437,6 +5461,8 @@ private function render_admin_payout_request_detail( $id ) {
             return;
         }
     }
+
+    $paid_at_value = isset( $row->paid_at ) ? $row->paid_at : '';
 
     echo '<div class="wrap"><h1>Payout Request #' . esc_html( $row->id ) . '</h1>';
     ?>
@@ -5471,7 +5497,7 @@ private function render_admin_payout_request_detail( $id ) {
         </tr>
         <tr>
             <th scope="row">Paid At</th>
-            <td><?php echo $row->paid_at ? esc_html( $row->paid_at ) : '—'; ?></td>
+            <td><?php echo $paid_at_value ? esc_html( $paid_at_value ) : '—'; ?></td>
         </tr>
     </table>
 
