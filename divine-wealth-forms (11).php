@@ -62,6 +62,9 @@ class Divine_Wealth_Forms {
         add_action( 'admin_post_dw_update_member_code', array( $this, 'admin_update_member_code' ) );
         add_action( 'admin_post_dw_save_member_admin_notes', array( $this, 'admin_save_member_notes' ) );
         add_action( 'admin_post_dw_reply_member', array( $this, 'admin_reply_member' ) );
+        add_action( 'admin_post_dw_update_business_approval', array( $this, 'admin_update_business_approval' ) );
+        add_action( 'admin_post_dw_add_employee_subcode', array( $this, 'admin_add_employee_subcode' ) );
+        add_action( 'admin_post_dw_delete_employee_subcode', array( $this, 'admin_delete_employee_subcode' ) );
         // Admin POST actions (travel detail page tools)
         add_action( 'admin_post_dw_update_travel_tier', array( $this, 'admin_update_travel_tier' ) );
         add_action( 'admin_post_dw_update_travel_code', array( $this, 'admin_update_travel_code' ) );
@@ -127,6 +130,26 @@ public static function maybe_upgrade_tables() {
         $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN status_changed_at DATETIME NULL" );
     }
 
+    if ( ! in_array( 'is_business', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN is_business TINYINT(1) NOT NULL DEFAULT 0" );
+    }
+    if ( ! in_array( 'business_approval_status', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN business_approval_status VARCHAR(20) NULL" );
+    }
+    if ( ! in_array( 'business_approved_at', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN business_approved_at DATETIME NULL" );
+    }
+
+    // Ensure existing rows have a status value
+    $wpdb->query( "UPDATE {$members_table} SET status = 'active' WHERE status IS NULL OR status = ''" );
+    $wpdb->query( "UPDATE {$members_table} SET is_business = 1 WHERE (referral_type = 'business_partner' OR referral_type = 'both') AND (is_business IS NULL OR is_business = 0)" );
+    if ( ! in_array( 'status', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'" );
+    }
+    if ( ! in_array( 'status_changed_at', $member_cols, true ) ) {
+        $wpdb->query( "ALTER TABLE {$members_table} ADD COLUMN status_changed_at DATETIME NULL" );
+    }
+
     // Ensure existing rows have a status value
     $wpdb->query( "UPDATE {$members_table} SET status = 'active' WHERE status IS NULL OR status = ''" );
 
@@ -172,7 +195,7 @@ public static function maybe_upgrade_tables() {
         if ( ! in_array( 'status', $business_cols, true ) ) {
             $wpdb->query( "ALTER TABLE {$business_table} ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'new'" );
         }
-        if ( ! in_array( 'status_updated_at', $business_cols, true ) ) {
+       if ( ! in_array( 'status_updated_at', $business_cols, true ) ) {
             $wpdb->query( "ALTER TABLE {$business_table} ADD COLUMN status_updated_at DATETIME NULL" );
         }
     }
@@ -225,6 +248,28 @@ public static function maybe_upgrade_tables() {
         }
     }
 
+        // ===== Employee Sub-Referral Codes table =====
+    $employee_table  = $wpdb->prefix . 'dw_employee_subcodes';
+    $employee_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $employee_table ) );
+
+    if ( ! $employee_exists ) {
+        $charset_collate = $wpdb->get_charset_collate();
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        dbDelta( "CREATE TABLE {$employee_table} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            business_member_id BIGINT(20) UNSIGNED NOT NULL,
+            employee_name VARCHAR(190) NOT NULL,
+            employee_code VARCHAR(80) NOT NULL,
+            notes TEXT NULL,
+            total_referrals INT(11) UNSIGNED NOT NULL DEFAULT 0,
+            total_revenue DECIMAL(12,2) NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY employee_code (employee_code),
+            KEY business_member_id (business_member_id)
+        ) {$charset_collate};" );
+    }
 }
 
 private function maybe_create_payout_table() {
@@ -351,6 +396,7 @@ private function maybe_create_payout_table() {
     $members_table  = $wpdb->prefix . 'dw_rewards_members';
     $travel_table   = $wpdb->prefix . 'dw_travel_requests';
     $business_table = $wpdb->prefix . 'dw_business_perks_requests';
+    $employee_table = $wpdb->prefix . 'dw_employee_subcodes';
     $payout_table   = $this->get_payout_table_name();
     $logs_table     = $wpdb->prefix . 'dw_referral_logs';
 
@@ -369,6 +415,9 @@ private function maybe_create_payout_table() {
         tier VARCHAR(20) NOT NULL DEFAULT 'concierge',
         status VARCHAR(20) NOT NULL DEFAULT 'active',
         status_changed_at DATETIME NULL,
+        is_business TINYINT(1) NOT NULL DEFAULT 0,
+        business_approval_status VARCHAR(20) NULL,
+        business_approved_at DATETIME NULL,
         city VARCHAR(190) NULL,
         state VARCHAR(50) NULL,
         notes TEXT NULL,
@@ -441,6 +490,22 @@ private function maybe_create_payout_table() {
         KEY referral_code (referral_code)
     ) {$charset_collate};";
 
+    // Employee sub-referral codes (per approved business member)
+    $sql .= "CREATE TABLE {$employee_table} (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_member_id BIGINT(20) UNSIGNED NOT NULL,
+        employee_name VARCHAR(190) NOT NULL,
+        employee_code VARCHAR(80) NOT NULL,
+        notes TEXT NULL,
+        total_referrals INT(11) UNSIGNED NOT NULL DEFAULT 0,
+        total_revenue DECIMAL(12,2) NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY employee_code (employee_code),
+        KEY business_member_id (business_member_id)
+    ) {$charset_collate};";
+    
     // Referral logs (each closed referral / commission)
     $sql .= "CREATE TABLE {$logs_table} (
         id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -505,6 +570,8 @@ private function maybe_create_payout_table() {
             'email_footer_tagline' => 'Taxes • Business Growth • Wealth Planning',
             'base_referral_payout'    => '25',  // default $25 per referral
             'enable_employee_subcodes'=> 0,     // toggle OFF by default
+            'use_default_perks'       => 1,
+            'tier_configs'            => $this->get_default_tier_configs(),
             'license_key'             => '',
             
         );
@@ -516,7 +583,106 @@ private function maybe_create_payout_table() {
 
         return array_merge( $defaults, $saved );
     }
+ /**
+     * Built-in tier defaults that can be overridden via settings.
+     */
+    private function get_default_tier_configs() {
+        return array(
+            'concierge' => array(
+                'label'        => 'Concierge Access',
+                'blurb'        => 'Perfect for clients and new partners starting to send referrals.',
+                'perks'        => array(
+                    '$25 for every completed tax referral',
+                    'Access to Travel Concierge for basic trip planning (flights & hotels)',
+                    'Invites to select Divine Wealth events & webinars',
+                ),
+                'requirements' => 'Free sign-up; active client or referral',
+                'business'     => 'Access to select partner discounts and basic business resources.',
+                'travel'       => 'Trip research, flight & hotel suggestions, basic concierge support.',
+                'commission'   => '$25 per completed tax referral',
+            ),
+            'elite' => array(
+                'label'        => 'Elite Concierge',
+                'blurb'        => 'You’re sending consistent referrals and unlocking enhanced perks.',
+                'perks'        => array(
+                    '$25+ per completed tax referral (based on custom agreements)',
+                    'Priority Travel Concierge responses on trip requests',
+                    'Occasional bonus perks (room upgrades, extra credits when available)',
+                    'Priority consideration for Business Perks requests',
+                ),
+                'requirements' => '5+ completed referrals or qualifying annual spend',
+                'business'     => 'Website credit, priority design queue, select marketing perks.',
+                'travel'       => 'Premium flight/hotel options, cruise planning, group trip support.',
+                'commission'   => '$35 per completed tax referral',
+            ),
+            'premier' => array(
+                'label'        => 'Premier Partner',
+                'blurb'        => 'High–value referral partner with access to deeper perks.',
+                'perks'        => array(
+                    'Higher–tier referral payouts (per custom agreement)',
+                    'Access to select Business Perks (branding, website credits, apparel)',
+                    'Group & retreat travel planning perks when available',
+                    'Early access to select Divine Wealth programs & launches',
+                ),
+                'requirements' => '10+ completed referrals or partner agreement',
+                'business'     => 'Business apparel / merch credits, branding upgrades, promo assets.',
+                'travel'       => 'Activities & excursion planning, VIP itinerary curation.',
+                'commission'   => '$50 per completed tax referral',
+            ),
+            'platinum' => array(
+                'label'        => 'Platinum Partner',
+                'blurb'        => 'Top–tier partner with VIP treatment across travel & business perks.',
+                'perks'        => array(
+                    'Custom referral payout structure',
+                    'VIP Travel Concierge support, including activities & excursions',
+                    'Priority Business Perks fulfillment (branding, web, apparel, marketing)',
+                    'First access to premium opportunities and collaborations',
+                ),
+                'requirements' => '25+ completed referrals or custom partner arrangement',
+                'business'     => 'Full branding support, larger website / funnel credits, launch campaigns.',
+                'travel'       => 'Full-service concierge, retreat planning, priority & white-glove support.',
+                'commission'   => '$75 per completed tax referral',
+            ),
+        );
+    }
 
+    /**
+     * Merge saved tier settings with defaults, honoring the toggle to use built-in perks.
+     */
+    private function get_active_tier_configs() {
+        $settings = $this->get_settings();
+        $defaults = $this->get_default_tier_configs();
+
+        if ( ! empty( $settings['use_default_perks'] ) ) {
+            return $defaults;
+        }
+
+        $configs = array();
+        $saved   = isset( $settings['tier_configs'] ) && is_array( $settings['tier_configs'] ) ? $settings['tier_configs'] : array();
+
+        foreach ( $defaults as $slug => $tier_default ) {
+            $custom = isset( $saved[ $slug ] ) && is_array( $saved[ $slug ] ) ? $saved[ $slug ] : array();
+
+            $tier = array();
+            $tier['label']        = ! empty( $custom['label'] ) ? $custom['label'] : $tier_default['label'];
+            $tier['blurb']        = isset( $custom['blurb'] ) ? $custom['blurb'] : $tier_default['blurb'];
+            $tier['requirements'] = isset( $custom['requirements'] ) ? $custom['requirements'] : $tier_default['requirements'];
+            $tier['business']     = isset( $custom['business'] ) ? $custom['business'] : $tier_default['business'];
+            $tier['travel']       = isset( $custom['travel'] ) ? $custom['travel'] : $tier_default['travel'];
+            $tier['commission']   = isset( $custom['commission'] ) ? $custom['commission'] : $tier_default['commission'];
+
+            $perks = array();
+            if ( isset( $custom['perks'] ) && is_array( $custom['perks'] ) ) {
+                $perks = array_filter( array_map( 'trim', $custom['perks'] ) );
+            }
+
+            $tier['perks'] = ! empty( $perks ) ? $perks : $tier_default['perks'];
+
+            $configs[ $slug ] = $tier;
+        }
+
+        return $configs;
+    }
     /**
      * Get the logo URL used in outgoing emails.
      * Allows override via wp-admin option "dw_rewards_logo_url".
@@ -562,6 +728,51 @@ private function maybe_create_payout_table() {
         return $wpdb->prefix . 'dw_payout_requests';
     }
 
+/**
+     * Return a normalized map of payout column names (legacy-safe).
+     */
+    private function get_payout_column_map() {
+        global $wpdb;
+
+        $table   = $this->get_payout_table_name();
+        $exists  = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+
+        if ( ! $exists ) {
+            return array(
+                'table'        => $table,
+                'exists'       => false,
+                'status'       => '',
+                'request_type' => '',
+                'payout_method'=> '',
+                'notes'        => '',
+                'paid_at'      => '',
+                'created_at'   => '',
+                'updated_at'   => '',
+                'amount'       => '',
+                'member_id'    => '',
+                'rewards_code' => '',
+                'details'      => '',
+            );
+        }
+
+        $columns = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", OBJECT_K );
+
+        return array(
+            'table'        => $table,
+            'exists'       => true,
+            'status'       => isset( $columns['status'] ) ? 'status' : ( isset( $columns['payout_status'] ) ? 'payout_status' : '' ),
+            'request_type' => isset( $columns['request_type'] ) ? 'request_type' : '',
+            'payout_method'=> isset( $columns['payout_method'] ) ? 'payout_method' : ( isset( $columns['method'] ) ? 'method' : '' ),
+            'notes'        => isset( $columns['admin_notes'] ) ? 'admin_notes' : ( isset( $columns['notes'] ) ? 'notes' : '' ),
+            'paid_at'      => isset( $columns['paid_at'] ) ? 'paid_at' : ( isset( $columns['paid_date'] ) ? 'paid_date' : '' ),
+            'created_at'   => isset( $columns['created_at'] ) ? 'created_at' : ( isset( $columns['created'] ) ? 'created' : '' ),
+            'updated_at'   => isset( $columns['updated_at'] ) ? 'updated_at' : '',
+            'amount'       => isset( $columns['amount_requested'] ) ? 'amount_requested' : ( isset( $columns['amount'] ) ? 'amount' : '' ),
+            'member_id'    => isset( $columns['member_id'] ) ? 'member_id' : '',
+            'rewards_code' => isset( $columns['rewards_code'] ) ? 'rewards_code' : '',
+            'details'      => isset( $columns['payout_details'] ) ? 'payout_details' : '',
+        );
+    }
 
     /**
      * Small helper to get the brand / company name for emails.
@@ -1146,6 +1357,40 @@ private function get_email_headers() {
             )
         );
     }
+    
+     private function find_member_by_id( $member_id ) {
+        global $wpdb;
+        $members_table = $wpdb->prefix . 'dw_rewards_members';
+
+        return $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$members_table} WHERE id = %d LIMIT 1",
+                $member_id
+            )
+        );
+    }
+
+    private function find_employee_subcode( $code ) {
+        global $wpdb;
+
+        if ( ! $code ) {
+            return null;
+        }
+
+        $employee_table = $wpdb->prefix . 'dw_employee_subcodes';
+        $table_exists   = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $employee_table ) );
+
+        if ( $table_exists !== $employee_table ) {
+            return null;
+        }
+
+        return $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$employee_table} WHERE employee_code = %s LIMIT 1",
+                $code
+            )
+        );
+    }
 
     /**
      * Check if a referral code belongs to a business-eligible Rewards member.
@@ -1557,6 +1802,11 @@ private function get_email_headers() {
     }
 
     $code = trim( $code );
+    
+     $is_employee_view   = false;
+    $employee_subcode   = null;
+    $employee_table     = $wpdb->prefix . 'dw_employee_subcodes';
+    $employee_tbl_ready = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $employee_table ) ) === $employee_table;
 
     // Initialize payout notice vars so they’re always defined
     $payout_notice      = '';
@@ -1579,8 +1829,17 @@ private function get_email_headers() {
         return ob_get_clean();
     }
 
-    // 2) Look up member by code
+     // 2) Look up member by code (or employee subcode)
     $member = $this->find_member_by_code( $code );
+
+    if ( ! $member && $employee_tbl_ready ) {
+        $employee_subcode = $this->find_employee_subcode( $code );
+
+        if ( $employee_subcode ) {
+            $member            = $this->find_member_by_id( (int) $employee_subcode->business_member_id );
+            $is_employee_view  = (bool) $member;
+        }
+    }
 
     if ( ! $member ) {
         echo '<div class="dw-alert dw-alert--full dw-alert--error">';
@@ -1592,6 +1851,7 @@ private function get_email_headers() {
         return ob_get_clean();
     }
 
+    $active_rewards_code = $is_employee_view && $employee_subcode ? $employee_subcode->employee_code : $member->referral_code;
     // ------------------------------------------------------------------
     // Payout request handling (front-end form)
     // ------------------------------------------------------------------
@@ -1603,7 +1863,7 @@ private function get_email_headers() {
         $posted_code = sanitize_text_field( wp_unslash( $_POST['dw_rewards_code'] ) );
 
         // Ensure the posted code matches the member we’re showing
-        if ( hash_equals( $member->referral_code, $posted_code ) ) {
+        if ( hash_equals( $active_rewards_code, $posted_code ) ) {
             $nonce_ok = isset( $_POST['dw_payout_nonce'] )
                 && wp_verify_nonce(
                     sanitize_text_field( wp_unslash( $_POST['dw_payout_nonce'] ) ),
@@ -1658,7 +1918,7 @@ $insert_formats = array();
 
 /* Always insert these core fields (they should exist). */
 $insert_data['member_id']        = (int) $member->id;
-$insert_data['rewards_code']     = $member->referral_code;
+$insert_data['rewards_code']     = $active_rewards_code;
 $insert_data['amount_requested'] = $amount_requested;
 
 $insert_formats[] = '%d';
@@ -1735,62 +1995,57 @@ if ( false === $inserted ) {
     }
 
     // 3) Tier metadata (labels + perk descriptions)
-    $tier_slug = strtolower( $member->tier ?: 'concierge' );
-
-    $tiers_meta = array(
-        'concierge' => array(
-            'label' => 'Concierge Access',
-            'blurb' => 'Perfect for clients and new partners starting to send referrals.',
-            'perks' => array(
-                '$25 for every completed tax referral',
-                'Access to Travel Concierge for basic trip planning (flights & hotels)',
-                'Invites to select Divine Wealth events & webinars',
-            ),
-        ),
-        'elite' => array(
-            'label' => 'Elite Concierge',
-            'blurb' => 'You’re sending consistent referrals and unlocking enhanced perks.',
-            'perks' => array(
-                '$25+ per completed tax referral (based on custom agreements)',
-                'Priority Travel Concierge responses on trip requests',
-                'Occasional bonus perks (room upgrades, extra credits when available)',
-                'Priority consideration for Business Perks requests',
-            ),
-        ),
-        'premier' => array(
-            'label' => 'Premier Partner',
-            'blurb' => 'High–value referral partner with access to deeper perks.',
-            'perks' => array(
-                'Higher–tier referral payouts (per custom agreement)',
-                'Access to select Business Perks (branding, website credits, apparel)',
-                'Group & retreat travel planning perks when available',
-                'Early access to select Divine Wealth programs & launches',
-            ),
-        ),
-        'platinum' => array(
-            'label' => 'Platinum Partner',
-            'blurb' => 'Top–tier partner with VIP treatment across travel & business perks.',
-            'perks' => array(
-                'Custom referral payout structure',
-                'VIP Travel Concierge support, including activities & excursions',
-                'Priority Business Perks fulfillment (branding, web, apparel, marketing)',
-                'First access to premium opportunities and collaborations',
-            ),
-        ),
-    );
-
-    $tier_meta = isset( $tiers_meta[ $tier_slug ] ) ? $tiers_meta[ $tier_slug ] : $tiers_meta['concierge'];
+    $tier_slug     = strtolower( $member->tier ?: 'concierge' );
+    $tiers_meta    = $this->get_active_tier_configs();
+    $tier_meta     = isset( $tiers_meta[ $tier_slug ] ) ? $tiers_meta[ $tier_slug ] : $tiers_meta['concierge'];
 
     // 4) Totals
-    $total_referrals = (int) $member->total_referrals;
-    $total_revenue   = (float) $member->total_revenue;
+    $total_referrals = $is_employee_view && $employee_subcode
+        ? (int) $employee_subcode->total_referrals
+        : (int) $member->total_referrals;
+
+    $total_revenue = $is_employee_view && $employee_subcode
+        ? (float) $employee_subcode->total_revenue
+        : (float) $member->total_revenue;
+
+    $display_name   = $is_employee_view && $employee_subcode ? $employee_subcode->employee_name : $member->full_name;
+    $code_label     = $is_employee_view ? 'Employee Code' : 'Rewards Code';
+    $code_sub_label = $is_employee_view && $member->referral_code
+        ? 'Business Rewards Code: ' . $member->referral_code
+        : '';
+
+    $employee_subcodes_for_member = array();
+    if ( $member->is_business && $employee_tbl_ready ) {
+        $employee_subcodes_for_member = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT employee_name, employee_code, total_referrals, total_revenue, created_at FROM {$employee_table} WHERE business_member_id = %d ORDER BY employee_name ASC",
+                $member->id
+            )
+        );
+    }
+
+    $display_name   = $is_employee_view && $employee_subcode ? $employee_subcode->employee_name : $member->full_name;
+    $code_label     = $is_employee_view ? 'Employee Code' : 'Rewards Code';
+    $code_sub_label = $is_employee_view && $member->referral_code
+        ? 'Business Rewards Code: ' . $member->referral_code
+        : '';
+
+    $employee_subcodes_for_member = array();
+    if ( $member->is_business && $employee_tbl_ready ) {
+        $employee_subcodes_for_member = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT employee_name, employee_code, total_referrals, total_revenue, created_at FROM {$employee_table} WHERE business_member_id = %d ORDER BY employee_name ASC",
+                $member->id
+            )
+        );
+    }
 
     // 5) Output summary card
     echo '<div class="dw-summary-header">';
     echo '<div class="dw-summary-heading">';
 
     echo '<div class="dw-summary-label">Divine Wealth Rewards</div>';
-    echo '<h2 class="dw-summary-title">' . esc_html( $member->full_name ) . '</h2>';
+    echo '<h2 class="dw-summary-title">' . esc_html( $display_name ) . '</h2>';
     if ( $member->business_name ) {
         echo '<div class="dw-summary-subtitle">' . esc_html( $member->business_name ) . '</div>';
     }
@@ -1800,10 +2055,21 @@ if ( false === $inserted ) {
     echo '<div class="dw-summary-tier">';
     echo '<div class="dw-summary-tier-label">Current Tier</div>';
     echo '<div class="dw-summary-tier-name">' . esc_html( $tier_meta['label'] ) . '</div>';
-    echo '<div class="dw-summary-tier-code"><span>Rewards Code:</span> <code>' . esc_html( $member->referral_code ) . '</code></div>';
+    echo '<div class="dw-summary-tier-code"><span>' . esc_html( $code_label ) . ':</span> <code>' . esc_html( $active_rewards_code ) . '</code></div>';
+    if ( $code_sub_label ) {
+        echo '<div class="dw-summary-tier-subcode">' . esc_html( $code_sub_label ) . '</div>';
+    }
     echo '</div>'; // .dw-summary-tier
 
     echo '</div>'; // .dw-summary-header
+
+   if ( $is_employee_view && $employee_subcode ) {
+        echo '<div class="dw-alert dw-alert--floating dw-alert--info" style="margin-bottom:1rem;">';
+        echo '<div class="dw-alert__inner">';
+        echo '<span class="dw-alert__icon">👥</span>';
+        echo '<span class="dw-alert__message">You are viewing employee sub-referral performance for <strong>' . esc_html( $employee_subcode->employee_name ) . '</strong> under this business account.</span>';
+        echo '</div></div>';
+    }
 
     // Stats
     echo '<div class="dw-summary-stats">';
@@ -1812,11 +2078,39 @@ if ( false === $inserted ) {
     echo '<div class="dw-summary-stat-value">' . esc_html( $total_referrals ) . '</div>';
     echo '</div>';
 
-    echo '<div class="dw-summary-stat">';
+  echo '<div class="dw-summary-stat">';
     echo '<div class="dw-summary-stat-label">Tracked Revenue</div>';
     echo '<div class="dw-summary-stat-value">$' . esc_html( number_format( $total_revenue, 2 ) ) . '</div>';
     echo '</div>';
     echo '</div>'; // .dw-summary-stats
+
+    if ( $member->is_business && ! $is_employee_view ) {
+        echo '<div class="dw-summary-employee-panel">';
+        echo '<h3 style="margin-top:1.5rem;">Employee Sub-Referral Performance</h3>';
+
+        if ( $employee_tbl_ready && $employee_subcodes_for_member ) {
+            echo '<table class="widefat" style="margin-top:.75rem; max-width:100%;">';
+            echo '<thead><tr><th>Employee</th><th>Code</th><th>Referrals</th><th>Tracked Revenue</th><th>Added</th></tr></thead>';
+            echo '<tbody>';
+            foreach ( $employee_subcodes_for_member as $emp ) {
+                echo '<tr>';
+                echo '<td>' . esc_html( $emp->employee_name ) . '</td>';
+                echo '<td><code>' . esc_html( $emp->employee_code ) . '</code></td>';
+                echo '<td>' . esc_html( (int) $emp->total_referrals ) . '</td>';
+                echo '<td>$' . esc_html( number_format( (float) $emp->total_revenue, 2 ) ) . '</td>';
+                echo '<td>' . esc_html( $emp->created_at ) . '</td>';
+                echo '</tr>';
+            }
+            echo '</tbody>';
+            echo '</table>';
+        } elseif ( $employee_tbl_ready ) {
+            echo '<p style="margin-top:.75rem;">No employee sub-referral codes have been added yet.</p>';
+        } else {
+            echo '<p style="margin-top:.75rem;">Employee sub-referral tracking will appear here once the database upgrade finishes.</p>';
+        }
+
+        echo '</div>';
+    }
 
     // Perks
     echo '<div class="dw-summary-perks">';
@@ -1855,7 +2149,7 @@ if ( false === $inserted ) {
 
     echo '<form method="post" class="dw-form" style="max-width:520px; margin-top:1rem;">';
     echo wp_nonce_field( 'dw_payout_' . $member->id, 'dw_payout_nonce', true, false );
-    echo '<input type="hidden" name="dw_rewards_code" value="' . esc_attr( $member->referral_code ) . '" />';
+    echo '<input type="hidden" name="dw_rewards_code" value="' . esc_attr( $active_rewards_code ) . '" />';
 
     // Amount
     echo '<div class="dw-field">';
@@ -1999,38 +2293,7 @@ public function render_tier_perks_table() {
         return ob_get_clean();
     }
 
-    // Static config for now – you can tweak text anytime
-    $tiers = array(
-        'concierge' => array(
-            'label'        => 'Concierge Access',
-            'requirements' => 'Free sign-up; active client or referral',
-            'business'     => 'Access to select partner discounts and basic business resources.',
-            'travel'       => 'Trip research, flight & hotel suggestions, basic concierge support.',
-            'commission'   => '$25 per completed tax referral',
-        ),
-        'elite' => array(
-            'label'        => 'Elite Concierge',
-            'requirements' => '5+ completed referrals or qualifying annual spend',
-            'business'     => 'Website credit, priority design queue, select marketing perks.',
-            'travel'       => 'Premium flight/hotel options, cruise planning, group trip support.',
-            'commission'   => '$35 per completed tax referral',
-        ),
-        'premier' => array(
-            'label'        => 'Premier Partner',
-            'requirements' => '10+ completed referrals or partner agreement',
-            'business'     => 'Business apparel / merch credits, branding upgrades, promo assets.',
-            'travel'       => 'Activities & excursion planning, VIP itinerary curation.',
-            'commission'   => '$50 per completed tax referral',
-        ),
-        'platinum' => array(
-            'label'        => 'Platinum Partner',
-            'requirements' => '25+ completed referrals or custom partner arrangement',
-            'business'     => 'Full branding support, larger website / funnel credits, launch campaigns.',
-            'travel'       => 'Full-service concierge, retreat planning, priority & white-glove support.',
-            'commission'   => '$75 per completed tax referral',
-        ),
-    );
-
+    $tiers = $this->get_active_tier_configs();
     ob_start();
     ?>
     <div class="dw-tier-table-wrap">
@@ -2313,7 +2576,7 @@ public function render_tier_perks_table() {
         'dw-referral-logs',
         array( $this, 'render_admin_referral_logs' )
     );
-    add_submenu_page(
+  add_submenu_page(
         'dw-rewards-admin',
         'Rewards Email Settings',
         'Email Settings',
@@ -2321,7 +2584,7 @@ public function render_tier_perks_table() {
         'dw-rewards-settings',
         array( $this, 'render_admin_email_settings' )
     );
-    
+
             add_submenu_page(
             'dw-rewards-admin',
             'Rewards Settings',
@@ -2332,12 +2595,38 @@ public function render_tier_perks_table() {
         );
 
     add_submenu_page(
+        'dw-rewards-admin',
+        'Tier & Perks Settings',
+        'Tier & Perks Settings',
+        'manage_options',
+        'dw-tier-perks-settings',
+        array( $this, 'render_tier_perks_settings_page' )
+    );
+
+    add_submenu_page(
     'dw-rewards-admin',                      // parent slug (whatever you used for main Rewards menu)
     'Payout Requests',                       // page title
     'Payout Requests',                       // menu title
     'manage_options',                        // capability
     'dw-payout-requests',                    // menu slug
     array( $this, 'render_admin_payout_requests' )  // callback
+    );
+
+    add_submenu_page(
+        'dw-rewards-admin',
+        'Rewards Payments',
+        'Rewards Payments',
+        'manage_options',
+        'dw-rewards-payments',
+        array( $this, 'render_admin_rewards_payments' )
+    );
+    add_submenu_page(
+        'dw-rewards-admin',
+        'Rewards Payments',
+        'Rewards Payments',
+        'manage_options',
+        'dw-rewards-payments',
+        array( $this, 'render_admin_rewards_payments' )
     );
 
 }
@@ -2483,12 +2772,53 @@ public function render_tier_perks_table() {
         $output['brand_name']           = isset( $input['brand_name'] ) ? sanitize_text_field( $input['brand_name'] ) : $defaults['brand_name'];
         $output['logo_url']             = isset( $input['logo_url'] ) ? esc_url_raw( $input['logo_url'] ) : $defaults['logo_url'];
         $output['banner_bg_color']      = isset( $input['banner_bg_color'] ) ? sanitize_hex_color( $input['banner_bg_color'] ) : $defaults['banner_bg_color'];
-        $output['email_reply_to']       = isset( $input['email_reply_to'] ) ? sanitize_email( $input['email_reply_to'] ) : $defaults['email_reply_to'];
+       $output['email_reply_to']       = isset( $input['email_reply_to'] ) ? sanitize_email( $input['email_reply_to'] ) : $defaults['email_reply_to'];
         $output['email_signature']      = isset( $input['email_signature'] ) ? sanitize_textarea_field( $input['email_signature'] ) : $defaults['email_signature'];
         $output['base_referral_payout'] = isset( $input['base_referral_payout'] ) ? sanitize_text_field( $input['base_referral_payout'] ) : $defaults['base_referral_payout'];
 
         // checkbox: 0/1
         $output['enable_employee_subcodes'] = ! empty( $input['enable_employee_subcodes'] ) ? 1 : 0;
+
+        // toggle for perks
+        $output['use_default_perks'] = ! empty( $input['use_default_perks'] ) ? 1 : 0;
+
+        // Tier configs (customizable)
+        $tier_defaults = $this->get_default_tier_configs();
+        $output['tier_configs'] = array();
+
+        foreach ( $tier_defaults as $slug => $tier_default ) {
+            $tier_input = isset( $input['tier_configs'][ $slug ] ) && is_array( $input['tier_configs'][ $slug ] )
+                ? $input['tier_configs'][ $slug ]
+                : array();
+
+            $tier = array();
+            $tier['label']        = isset( $tier_input['label'] ) ? sanitize_text_field( $tier_input['label'] ) : $tier_default['label'];
+            $tier['blurb']        = isset( $tier_input['blurb'] ) ? sanitize_textarea_field( $tier_input['blurb'] ) : $tier_default['blurb'];
+            $tier['requirements'] = isset( $tier_input['requirements'] ) ? sanitize_text_field( $tier_input['requirements'] ) : $tier_default['requirements'];
+            $tier['business']     = isset( $tier_input['business'] ) ? sanitize_text_field( $tier_input['business'] ) : $tier_default['business'];
+            $tier['travel']       = isset( $tier_input['travel'] ) ? sanitize_text_field( $tier_input['travel'] ) : $tier_default['travel'];
+            $tier['commission']   = isset( $tier_input['commission'] ) ? sanitize_text_field( $tier_input['commission'] ) : $tier_default['commission'];
+
+            $perks_raw = array();
+            if ( isset( $tier_input['perks'] ) ) {
+                $perks_raw = is_array( $tier_input['perks'] ) ? $tier_input['perks'] : explode( "\n", (string) $tier_input['perks'] );
+            }
+
+            $tier['perks'] = array();
+            foreach ( $perks_raw as $perk ) {
+                $perk = trim( wp_unslash( $perk ) );
+                if ( '' === $perk ) {
+                    continue;
+                }
+                $tier['perks'][] = sanitize_text_field( $perk );
+            }
+
+            if ( empty( $tier['perks'] ) ) {
+                $tier['perks'] = $tier_default['perks'];
+            }
+
+            $output['tier_configs'][ $slug ] = $tier;
+        }
 
         $output['license_key'] = isset( $input['license_key'] ) ? sanitize_text_field( $input['license_key'] ) : $defaults['license_key'];
 
@@ -2563,10 +2893,139 @@ public function render_tier_perks_table() {
                 submit_button();
                 ?>
             </form>
+            </div>
+            <?php
+    }
+       
+     /**
+     *Admin page: Tier & perks customization (toggle between defaults and custom copy)
+     */
+    public function render_tier_perks_settings_page() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
+        $settings     = $this->get_settings();
+        $defaults     = $this->get_default_tier_configs();
+        $saved_custom = isset( $settings['tier_configs'] ) && is_array( $settings['tier_configs'] ) ? $settings['tier_configs'] : $defaults;
+        $use_defaults = ! empty( $settings['use_default_perks'] );
+        ?>
+        <div class="wrap">
+            <h1>Tier &amp; Perks Settings</h1>
+            <p>Toggle between the built-in Divine Wealth perks or customize tier copy, perks, and table details. Custom settings apply to the Rewards Summary and the public Tier Perks table.</p>
+
+            <form method="post" action="options.php">
+                <?php
+                settings_fields( 'dw_rewards_settings_group' );
+                ?>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row">Use default Divine Wealth perks</th>
+                        <td>
+                            <label for="dw_use_default_perks">
+                                <input type="checkbox"
+                                       id="dw_use_default_perks"
+                                       name="dw_rewards_settings[use_default_perks]"
+                                       value="1" <?php checked( 1, $use_defaults ); ?> />
+                                Keep the built-in perks and descriptions (recommended starting point).
+                            </label>
+                            <p class="description">Uncheck to use the custom tier fields below.</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h2>Custom tier copy &amp; perks</h2>
+                <p class="description">These fields are used when the default perks toggle is off. Leave any field blank to fall back to the default.</p>
+
+                <?php foreach ( $defaults as $slug => $tier_default ) :
+                    $tier = isset( $saved_custom[ $slug ] ) && is_array( $saved_custom[ $slug ] ) ? $saved_custom[ $slug ] : array();
+                    $perks_for_field = isset( $tier['perks'] ) && is_array( $tier['perks'] ) ? implode( "\n", $tier['perks'] ) : implode( "\n", $tier_default['perks'] );
+                    ?>
+                    <div class="postbox" style="padding:0 16px; margin:20px 0;">
+                        <h2 style="padding:12px 0; margin:0; border-bottom:1px solid #eee;">Tier: <?php echo esc_html( ucfirst( $slug ) ); ?></h2>
+                        <table class="form-table" role="presentation">
+                            <tr>
+                                <th scope="row"><label for="dw_tier_label_<?php echo esc_attr( $slug ); ?>">Label</label></th>
+                                <td>
+                                    <input type="text"
+                                           class="regular-text"
+                                           id="dw_tier_label_<?php echo esc_attr( $slug ); ?>"
+                                           name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][label]"
+                                           value="<?php echo esc_attr( $tier['label'] ?? $tier_default['label'] ); ?>" />
+                                </td>
+                            </tr>
+                            <tr>
+                                <th scope="row"><label for="dw_tier_blurb_<?php echo esc_attr( $slug ); ?>">Blurb</label></th>
+                                <td>
+                                    <textarea
+                                        class="large-text"
+                                        rows="3"
+                                        id="dw_tier_blurb_<?php echo esc_attr( $slug ); ?>"
+                                        name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][blurb]"
+                                    ><?php echo esc_textarea( $tier['blurb'] ?? $tier_default['blurb'] ); ?></textarea>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th scope="row"><label for="dw_tier_perks_<?php echo esc_attr( $slug ); ?>">Perks (one per line)</label></th>
+                                <td>
+                                    <textarea
+                                        class="large-text code"
+                                        rows="5"
+                                        id="dw_tier_perks_<?php echo esc_attr( $slug ); ?>"
+                                        name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][perks]"
+                                    ><?php echo esc_textarea( $perks_for_field ); ?></textarea>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th scope="row"><label for="dw_tier_requirements_<?php echo esc_attr( $slug ); ?>">Requirements</label></th>
+                                <td>
+                                    <input type="text"
+                                           class="regular-text"
+                                           id="dw_tier_requirements_<?php echo esc_attr( $slug ); ?>"
+                                           name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][requirements]"
+                                           value="<?php echo esc_attr( $tier['requirements'] ?? $tier_default['requirements'] ); ?>" />
+                                </td>
+                            </tr>
+                            <tr>
+                                <th scope="row"><label for="dw_tier_business_<?php echo esc_attr( $slug ); ?>">Business perks</label></th>
+                                <td>
+                                    <input type="text"
+                                           class="regular-text"
+                                           id="dw_tier_business_<?php echo esc_attr( $slug ); ?>"
+                                           name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][business]"
+                                           value="<?php echo esc_attr( $tier['business'] ?? $tier_default['business'] ); ?>" />
+                                </td>
+                            </tr>
+                            <tr>
+                                <th scope="row"><label for="dw_tier_travel_<?php echo esc_attr( $slug ); ?>">Travel perks</label></th>
+                                <td>
+                                    <input type="text"
+                                           class="regular-text"
+                                           id="dw_tier_travel_<?php echo esc_attr( $slug ); ?>"
+                                           name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][travel]"
+                                           value="<?php echo esc_attr( $tier['travel'] ?? $tier_default['travel'] ); ?>" />
+                                </td>
+                            </tr>
+                            <tr>
+                                <th scope="row"><label for="dw_tier_commission_<?php echo esc_attr( $slug ); ?>">Referral commission</label></th>
+                                <td>
+                                    <input type="text"
+                                           class="regular-text"
+                                           id="dw_tier_commission_<?php echo esc_attr( $slug ); ?>"
+                                           name="dw_rewards_settings[tier_configs][<?php echo esc_attr( $slug ); ?>][commission]"
+                                           value="<?php echo esc_attr( $tier['commission'] ?? $tier_default['commission'] ); ?>" />
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+                <?php endforeach; ?>
+
+                <?php submit_button(); ?>
+            </form>
         </div>
         <?php
     }
-
     /**
      * Admin page: Email / branding settings for rewards emails.
      */
@@ -2826,7 +3285,6 @@ public function admin_save_email_settings() {
         }
         echo '</div></div>';
     }
-
     // ===== Admin View Helpers =====
 
     private function admin_get_action() {
@@ -2920,6 +3378,23 @@ private function render_admin_rewards_member_detail( $id ) {
             echo '<div class="notice notice-success is-dismissible"><p>Member status updated.</p></div>';
         } elseif ( 'tier' === $updated_field ) {
             echo '<div class="notice notice-success is-dismissible"><p>Member tier updated.</p></div>';
+        } elseif ( 'business_approval' === $updated_field ) {
+            echo '<div class="notice notice-success is-dismissible"><p>Business approval status updated.</p></div>';
+        }
+    }
+
+    if ( isset( $_GET['dw_employee_added'] ) ) {
+        echo '<div class="notice notice-success is-dismissible"><p>Employee sub-referral code added.</p></div>';
+    }
+    if ( isset( $_GET['dw_employee_deleted'] ) ) {
+        echo '<div class="notice notice-success is-dismissible"><p>Employee sub-referral code deleted.</p></div>';
+    }
+    if ( isset( $_GET['dw_employee_error'] ) ) {
+        $error = sanitize_key( wp_unslash( $_GET['dw_employee_error'] ) );
+        if ( 'missing' === $error ) {
+            echo '<div class="notice notice-error is-dismissible"><p>Please provide both an employee name and code.</p></div>';
+        } elseif ( 'code_exists' === $error ) {
+            echo '<div class="notice notice-error is-dismissible"><p>That employee code already exists. Please choose a unique code.</p></div>';
         }
     }
 
@@ -2936,12 +3411,14 @@ private function render_admin_rewards_member_detail( $id ) {
     $code_action_url  = admin_url( 'admin-post.php' );
     $notes_action_url = admin_url( 'admin-post.php' );
     $reply_action_url = admin_url( 'admin-post.php' );
+    $employee_action_url = admin_url( 'admin-post.php' );
 
     $tier_nonce  = wp_create_nonce( 'dw_update_member_tier_' . $id );
     $status_nonce = wp_create_nonce( 'dw_update_member_status_' . $id );
     $code_nonce  = wp_create_nonce( 'dw_update_member_code_' . $id );
     $notes_nonce = wp_create_nonce( 'dw_save_member_notes_' . $id );
     $reply_nonce = wp_create_nonce( 'dw_reply_member_' . $id );
+    $employee_nonce = wp_create_nonce( 'dw_manage_employee_codes_' . $id );
     
     $referral_action_url = admin_url( 'admin-post.php' );
     $referral_nonce      = wp_create_nonce( 'dw_add_member_referral_' . $id );
@@ -2959,10 +3436,16 @@ private function render_admin_rewards_member_detail( $id ) {
         'inactive' => 'Inactive',
         'archived' => 'Archived',
     );
+    
+     $settings                  = $this->get_settings();
+    $employee_subcodes_enabled = ! empty( $settings['enable_employee_subcodes'] );
+    $employee_table            = $wpdb->prefix . 'dw_employee_subcodes';
+    $employee_table_exists     = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $employee_table ) );
 
     $payout_table        = $this->get_payout_table_name();
     $payout_table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $payout_table ) );
     $recent_payouts      = array();
+    $employee_subcodes   = array();
 
     if ( $payout_table_exists ) {
         $recent_payouts = $wpdb->get_results(
@@ -2972,6 +3455,15 @@ private function render_admin_rewards_member_detail( $id ) {
                  WHERE member_id = %d
                  ORDER BY created_at DESC
                  LIMIT 5",
+                $id
+            )
+        );
+    }
+
+    if ( $employee_table_exists && $member->is_business ) {
+        $employee_subcodes = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT * FROM {$employee_table} WHERE business_member_id = %d ORDER BY created_at DESC",
                 $id
             )
         );
@@ -3001,6 +3493,9 @@ private function render_admin_rewards_member_detail( $id ) {
         'tier'            => 'Tier',
         'status'          => 'Status',
         'status_changed_at' => 'Status Updated',
+        'is_business'       => 'Is Business',
+        'business_approval_status' => 'Business Approval',
+        'business_approved_at'     => 'Business Approved At',
         'city'            => 'City',
         'state'           => 'State',
         'notes'           => 'Notes / Goals',
@@ -3070,6 +3565,58 @@ private function render_admin_rewards_member_detail( $id ) {
     echo '</div>';
 
     echo '</div>';
+ // Business approval tools (only when flagged as business)
+    if ( ! empty( $member->is_business ) ) {
+        $business_status = $member->business_approval_status ?: 'pending';
+        $business_labels = array(
+            'pending'  => 'Pending',
+            'approved' => 'Approved',
+            'rejected' => 'Rejected',
+        );
+
+        $business_action_url = admin_url( 'admin-post.php' );
+        $business_nonce      = wp_create_nonce( 'dw_update_business_approval_' . $id );
+
+        echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
+        echo '<h2 style="margin-top:0;">Business Approval</h2>';
+        echo '<p style="margin-bottom:10px;">Current approval: <strong>' . esc_html( $business_labels[ $business_status ] ?? ucfirst( $business_status ) ) . '</strong>';
+        if ( ! empty( $member->business_approved_at ) ) {
+            echo '<br><span style="color:#666;">Updated: ' . esc_html( $member->business_approved_at ) . '</span>';
+        }
+        echo '</p>';
+
+        echo '<form method="post" action="' . esc_url( $business_action_url ) . '" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">';
+        echo '<input type="hidden" name="action" value="dw_update_business_approval">';
+        echo '<input type="hidden" name="id" value="' . esc_attr( $id ) . '">';
+        echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $business_nonce ) . '">';
+        echo '<select name="business_approval_status">';
+        foreach ( $business_labels as $key => $label ) {
+            $selected = selected( $business_status, $key, false );
+            echo '<option value="' . esc_attr( $key ) . '" ' . $selected . '>' . esc_html( $label ) . '</option>';
+        }
+        echo '</select>';
+        echo '<button class="button button-primary">Save Business Status</button>';
+        echo '</form>';
+
+        echo '<div style="margin-top:10px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">';
+        echo '<form method="post" action="' . esc_url( $business_action_url ) . '" onsubmit="return confirm(\'Approve this business member?\');">';
+        echo '<input type="hidden" name="action" value="dw_update_business_approval">';
+        echo '<input type="hidden" name="id" value="' . esc_attr( $id ) . '">';
+        echo '<input type="hidden" name="business_approval_status" value="approved">';
+        echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $business_nonce ) . '">';
+        echo '<button class="button">Approve</button>';
+        echo '</form>';
+
+        echo '<form method="post" action="' . esc_url( $business_action_url ) . '" onsubmit="return confirm(\'Reject this business member?\');">';
+        echo '<input type="hidden" name="action" value="dw_update_business_approval">';
+        echo '<input type="hidden" name="id" value="' . esc_attr( $id ) . '">';
+        echo '<input type="hidden" name="business_approval_status" value="rejected">';
+        echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $business_nonce ) . '">';
+        echo '<button class="button">Reject</button>';
+        echo '</form>';
+        echo '</div>';
+        echo '</div>';
+    }
 
     // D) Update Tier tool
     echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
@@ -3137,7 +3684,58 @@ private function render_admin_rewards_member_detail( $id ) {
     }
     echo '</div>';
 
-    // F) Admin notes tool
+// F) Employee sub-referral codes (business members only)
+    if ( $member->is_business && $employee_subcodes_enabled ) {
+        echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
+        echo '<h2 style="margin-top:0;">Employee Sub-Referral Codes</h2>';
+
+        if ( 'approved' !== $member->business_approval_status ) {
+            echo '<p>This business member must be approved before adding employee subcodes.</p>';
+        } elseif ( ! $employee_table_exists ) {
+            echo '<p>Employee subcode table is not ready yet. Please refresh after the database upgrade completes.</p>';
+        } else {
+            echo '<p>Add employee-level referral codes and track their totals. Codes must be unique.</p>';
+
+            echo '<form method="post" action="' . esc_url( $employee_action_url ) . '" style="margin-bottom:14px;">';
+            echo '<input type="hidden" name="action" value="dw_add_employee_subcode">';
+            echo '<input type="hidden" name="member_id" value="' . esc_attr( $id ) . '">';
+            echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $employee_nonce ) . '">';
+            echo '<p><label><strong>Employee Name</strong><br><input type="text" name="employee_name" style="width:320px;"></label></p>';
+            echo '<p><label><strong>Employee Code</strong><br><input type="text" name="employee_code" style="width:220px; text-transform:uppercase;"></label></p>';
+            echo '<p><label><strong>Notes</strong><br><textarea name="employee_notes" rows="3" style="width:100%; max-width:600px;"></textarea></label></p>';
+            echo '<p><button class="button button-primary">Add Employee Code</button></p>';
+            echo '</form>';
+
+            if ( $employee_subcodes ) {
+                echo '<table class="widefat striped">';
+                echo '<thead><tr><th>Employee</th><th>Code</th><th>Total Referrals</th><th>Total Revenue</th><th>Notes</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+                foreach ( $employee_subcodes as $emp ) {
+                    echo '<tr>';
+                    echo '<td>' . esc_html( $emp->employee_name ) . '</td>';
+                    echo '<td><code>' . esc_html( $emp->employee_code ) . '</code></td>';
+                    echo '<td>' . esc_html( (int) $emp->total_referrals ) . '</td>';
+                    echo '<td>$' . esc_html( number_format( (float) $emp->total_revenue, 2 ) ) . '</td>';
+                    echo '<td>' . esc_html( $emp->notes ) . '</td>';
+                    echo '<td>' . esc_html( $emp->created_at ) . '</td>';
+                    echo '<td>';
+                    echo '<form method="post" action="' . esc_url( $employee_action_url ) . '" style="display:inline-block;">';
+                    echo '<input type="hidden" name="action" value="dw_delete_employee_subcode">';
+                    echo '<input type="hidden" name="member_id" value="' . esc_attr( $id ) . '">';
+                    echo '<input type="hidden" name="employee_id" value="' . esc_attr( $emp->id ) . '">';
+                    echo '<input type="hidden" name="_wpnonce" value="' . esc_attr( $employee_nonce ) . '">';
+                    echo '<button class="button button-link-delete" onclick="return confirm(\'Delete this employee code?\');">Delete</button>';
+                    echo '</form>';
+                    echo '</td>';
+                    echo '</tr>';
+                }
+                echo '</tbody></table>';
+            } else {
+                echo '<p>No employee codes yet for this business member.</p>';
+            }
+        }
+        echo '</div>';
+    }
+    // G) Admin notes tool
     echo '<div class="card" style="max-width:1100px; padding:16px 18px; margin-bottom:14px;">';
     echo '<h2 style="margin-top:0;">Internal Admin Notes</h2>';
     echo '<form method="post" action="' . esc_url( $notes_action_url ) . '">';
@@ -3213,7 +3811,7 @@ private function render_admin_rewards_member_detail( $id ) {
     global $wpdb;
 
     $table    = $wpdb->prefix . 'dw_rewards_members';
-  $per_page = 20;
+    $per_page = 20;
     $paged    = $this->admin_get_paged();
     $offset   = ( $paged - 1 ) * $per_page;
     $search   = $this->admin_get_search();
@@ -3299,6 +3897,7 @@ private function render_admin_rewards_member_detail( $id ) {
         <th>Referral Code</th>
         <th>Tier</th>
         <th>Status</th>
+        <th>Business Approval</th>
         <th>Total Referrals</th>
         <th>Total Revenue</th>
         <th>Actions</th>
@@ -3362,6 +3961,9 @@ private function render_admin_rewards_member_detail( $id ) {
             $badge_color = '#6c757d';
         }
         echo '<td><span style="display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;background:' . esc_attr( $badge_color ) . ';">' . esc_html( $status_label ) . '</span></td>';
+        // Business approval
+        $biz_label = $r->business_approval_status ? ucfirst( $r->business_approval_status ) : '—';
+        echo '<td>' . esc_html( $biz_label ) . '</td>';
 
         // Totals
         echo '<td>' . esc_html( $r->total_referrals ) . '</td>';
@@ -3442,7 +4044,7 @@ public function admin_update_member_tier() {
     );
     $view_url = add_query_arg( 'dw_updated', 'tier', $view_url );
 
-      wp_safe_redirect( $view_url );
+ wp_safe_redirect( $view_url );
     exit;
 }
 
@@ -3496,6 +4098,190 @@ public function admin_update_member_status() {
     exit;
 }
 
+/**
+ * Admin: update business approval status.
+ * Hook: admin_post_dw_update_business_approval
+ */
+public function admin_update_business_approval() {
+    $this->require_manage_options();
+
+    $id = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+    if ( ! $id ) {
+        wp_die( 'Invalid member ID.' );
+    }
+
+    $nonce_action = 'dw_update_business_approval_' . $id;
+    if (
+        empty( $_POST['_wpnonce'] ) ||
+        ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), $nonce_action )
+    ) {
+        wp_die( 'Security check failed.' );
+    }
+
+    $status  = isset( $_POST['business_approval_status'] ) ? sanitize_key( wp_unslash( $_POST['business_approval_status'] ) ) : '';
+    $allowed = array( 'pending', 'approved', 'rejected' );
+    if ( ! in_array( $status, $allowed, true ) ) {
+        wp_die( 'Invalid business approval status.' );
+    }
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'dw_rewards_members';
+
+    $wpdb->update(
+        $table,
+        array(
+            'business_approval_status' => $status,
+            'business_approved_at'     => current_time( 'mysql' ),
+        ),
+        array( 'id' => $id ),
+        array( '%s', '%s' ),
+        array( '%d' )
+    );
+
+    $view_url = wp_nonce_url(
+        admin_url( 'admin.php?page=dw-rewards-admin&action=view&id=' . $id ),
+        'dw_view_rewards_' . $id
+    );
+    $view_url = add_query_arg( 'dw_updated', 'business_approval', $view_url );
+
+    wp_safe_redirect( $view_url );
+    exit;
+}
+
+/**
+ * Admin: add an employee sub-referral code for a business member.
+ * Hook: admin_post_dw_add_employee_subcode
+ */
+public function admin_add_employee_subcode() {
+    $this->require_manage_options();
+
+    $member_id = isset( $_POST['member_id'] ) ? absint( $_POST['member_id'] ) : 0;
+    if ( ! $member_id ) {
+        wp_die( 'Invalid member ID.' );
+    }
+
+    $nonce_action = 'dw_manage_employee_codes_' . $member_id;
+    if (
+        empty( $_POST['_wpnonce'] ) ||
+        ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), $nonce_action )
+    ) {
+        wp_die( 'Security check failed.' );
+    }
+
+    $settings = $this->get_settings();
+    if ( empty( $settings['enable_employee_subcodes'] ) ) {
+        wp_die( 'Employee subcodes are disabled in settings.' );
+    }
+
+    global $wpdb;
+    $member_table   = $wpdb->prefix . 'dw_rewards_members';
+    $employee_table = $wpdb->prefix . 'dw_employee_subcodes';
+
+    $employee_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $employee_table ) );
+    if ( ! $employee_exists ) {
+        wp_die( 'Employee subcode table is not available yet. Please reload after the plugin upgrades the database.' );
+    }
+
+    $member = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$member_table} WHERE id = %d", $member_id ) );
+    if ( ! $member ) {
+        wp_die( 'Member not found.' );
+    }
+
+    if ( ! $member->is_business || 'approved' !== $member->business_approval_status ) {
+        wp_die( 'Employee subcodes can only be added to approved business members.' );
+    }
+
+    $employee_name = isset( $_POST['employee_name'] ) ? sanitize_text_field( wp_unslash( $_POST['employee_name'] ) ) : '';
+    $employee_code = isset( $_POST['employee_code'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_POST['employee_code'] ) ) ) : '';
+    $notes         = isset( $_POST['employee_notes'] ) ? sanitize_textarea_field( wp_unslash( $_POST['employee_notes'] ) ) : '';
+
+    $view_url = wp_nonce_url(
+        admin_url( 'admin.php?page=dw-rewards-admin&action=view&id=' . $member_id ),
+        'dw_view_rewards_' . $member_id
+    );
+
+    if ( ! $employee_name || ! $employee_code ) {
+        $view_url = add_query_arg( 'dw_employee_error', 'missing', $view_url );
+        wp_safe_redirect( $view_url );
+        exit;
+    }
+
+    $existing_code = (int) $wpdb->get_var(
+        $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$employee_table} WHERE employee_code = %s",
+            $employee_code
+        )
+    );
+
+    if ( $existing_code ) {
+        $view_url = add_query_arg( 'dw_employee_error', 'code_exists', $view_url );
+        wp_safe_redirect( $view_url );
+        exit;
+    }
+
+    $wpdb->insert(
+        $employee_table,
+        array(
+            'business_member_id' => $member_id,
+            'employee_name'      => $employee_name,
+            'employee_code'      => $employee_code,
+            'notes'              => $notes,
+            'created_at'         => current_time( 'mysql' ),
+            'updated_at'         => current_time( 'mysql' ),
+        ),
+        array( '%d', '%s', '%s', '%s', '%s', '%s' )
+    );
+
+    $view_url = add_query_arg( 'dw_employee_added', '1', $view_url );
+    wp_safe_redirect( $view_url );
+    exit;
+}
+
+/**
+ * Admin: delete an employee sub-referral code.
+ * Hook: admin_post_dw_delete_employee_subcode
+ */
+public function admin_delete_employee_subcode() {
+    $this->require_manage_options();
+
+    $member_id   = isset( $_POST['member_id'] ) ? absint( $_POST['member_id'] ) : 0;
+    $employee_id = isset( $_POST['employee_id'] ) ? absint( $_POST['employee_id'] ) : 0;
+
+    if ( ! $member_id || ! $employee_id ) {
+        wp_die( 'Invalid request.' );
+    }
+
+    $nonce_action = 'dw_manage_employee_codes_' . $member_id;
+    if (
+        empty( $_POST['_wpnonce'] ) ||
+        ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), $nonce_action )
+    ) {
+        wp_die( 'Security check failed.' );
+    }
+
+    global $wpdb;
+    $employee_table = $wpdb->prefix . 'dw_employee_subcodes';
+
+    $employee_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $employee_table ) );
+    if ( ! $employee_exists ) {
+        wp_die( 'Employee subcode table is not available yet.' );
+    }
+
+    $wpdb->delete(
+        $employee_table,
+        array( 'id' => $employee_id, 'business_member_id' => $member_id ),
+        array( '%d', '%d' )
+    );
+
+    $view_url = wp_nonce_url(
+        admin_url( 'admin.php?page=dw-rewards-admin&action=view&id=' . $member_id ),
+        'dw_view_rewards_' . $member_id
+    );
+    $view_url = add_query_arg( 'dw_employee_deleted', '1', $view_url );
+
+    wp_safe_redirect( $view_url );
+    exit;
+}
 /**
  * Admin: update referral code.
  * Hook: admin_post_dw_update_member_code
@@ -5274,6 +6060,21 @@ global $wpdb;
         return $this->render_admin_payout_request_detail( $view_id );
     }
 
+ // Detect the active payouts table (handles legacy table names).
+    $map      = $this->get_payout_column_map();
+    $table    = $map['table'];
+    $per_page = 20;
+    $paged    = $this->admin_get_paged();
+    $offset   = ( $paged - 1 ) * $per_page;
+    $search   = $this->admin_get_search();
+    $status   = isset( $_GET['status'] ) ? sanitize_text_field( wp_unslash( $_GET['status'] ) ) : '';
+    $type     = isset( $_GET['type'] ) ? sanitize_text_field( wp_unslash( $_GET['type'] ) ) : '';
+
+    $status_col  = $map['status'];
+    $type_col    = $map['request_type'];
+    $paid_col    = $map['paid_at'];
+    $created_col = $map['created_at'];
+    $method_col  = $map['payout_method'];
     // Use the direct table name; this is the table you confirmed has data.
     $table    = $wpdb->prefix . 'dw_payout_requests';
     $per_page = 20;
@@ -5289,19 +6090,36 @@ global $wpdb;
         )
     );
 
-    if ( ! $exists ) {
+     if ( ! $exists ) {
         echo '<div class="wrap"><h1>Payout Requests</h1><p>Table not found yet. Once the first payout request is stored, refresh this page.</p></div>';
         return;
     }
 
-    // 2) Build WHERE + params (simple text search)
+    if ( empty( $map['amount'] ) || empty( $map['rewards_code'] ) ) {
+        echo '<div class="wrap"><h1>Payout Requests</h1><p>Required payout columns are missing. Please run the installer or ensure the payouts table includes amount and rewards_code fields.</p></div>';
+        return;
+    }
+
+    // 2) Build WHERE + params (search + filters)
     $where  = '1=1';
     $params = array();
 
     if ( $search ) {
-        $like   = '%' . $wpdb->esc_like( $search ) . '%';
-        $where .= " AND (rewards_code LIKE %s OR payout_method LIKE %s)";
-        $params = array( $like, $like );
+        $like         = '%' . $wpdb->esc_like( $search ) . '%';
+        $method_field = $method_col ? $method_col : 'payout_method';
+        $code_field   = $map['rewards_code'] ? $map['rewards_code'] : 'rewards_code';
+        $where       .= " AND ({$code_field} LIKE %s OR {$method_field} LIKE %s)";
+        $params       = array( $like, $like );
+    }
+
+    if ( $status && $status_col && in_array( $status, array( 'new', 'pending', 'completed', 'cancelled', 'archived' ), true ) ) {
+        $where   .= " AND {$status_col} = %s";
+        $params[] = $status;
+    }
+
+    if ( $type && $type_col && in_array( $type, array( 'cash', 'service' ), true ) ) {
+        $where   .= " AND {$type_col} = %s";
+        $params[] = $type;
     }
 
     // 3) Count total rows
@@ -5316,11 +6134,43 @@ global $wpdb;
         $total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
     }
 
-    // 4) Fetch rows (no join for now, keep it simple and reliable)
-    $sql = "SELECT *
+   // 4) Select columns with aliases so legacy column names still display.
+    $select_parts = array( 'id' );
+
+    $amount_col = $map['amount'] ? $map['amount'] : 'amount_requested';
+    $select_parts[] = ( 'amount_requested' === $amount_col ) ? 'amount_requested' : "{$amount_col} AS amount_requested";
+
+    $code_col = $map['rewards_code'] ? $map['rewards_code'] : 'rewards_code';
+    $select_parts[] = ( 'rewards_code' === $code_col ) ? 'rewards_code' : "{$code_col} AS rewards_code";
+
+    if ( $created_col ) {
+        $select_parts[] = ( 'created_at' === $created_col ) ? 'created_at' : "{$created_col} AS created_at";
+    }
+
+    if ( $type_col ) {
+        $select_parts[] = ( 'request_type' === $type_col ) ? 'request_type' : "{$type_col} AS request_type";
+    }
+
+    if ( $method_col ) {
+        $select_parts[] = ( 'payout_method' === $method_col ) ? 'payout_method' : "{$method_col} AS payout_method";
+    }
+
+    if ( $status_col ) {
+        $select_parts[] = ( 'status' === $status_col ) ? 'status' : "{$status_col} AS status";
+    }
+
+    if ( $paid_col ) {
+        $select_parts[] = ( 'paid_at' === $paid_col ) ? 'paid_at' : "{$paid_col} AS paid_at";
+    }
+
+    $select = implode( ', ', $select_parts );
+
+    $order_by = $created_col ? 'created_at' : 'id';
+
+    $sql = "SELECT {$select}
             FROM {$table}
             WHERE {$where}
-            ORDER BY created_at DESC
+            ORDER BY {$order_by} DESC
             LIMIT %d OFFSET %d";
 
     if ( $params ) {
@@ -5334,31 +6184,46 @@ global $wpdb;
         );
     }
 
-    $status_labels = array(
+  $status_labels = array(
         'new'       => 'New',
         'pending'   => 'Pending Verification',
         'completed' => 'Completed',
         'cancelled' => 'Cancelled',
+        'archived'  => 'Archived',
     );
 
     echo '<div class="wrap"><h1>Payout Requests</h1>';
 
-    // Search form
+   // Search + filter form
     echo '<form method="get" style="margin:10px 0;">
             <input type="hidden" name="page" value="dw-payout-requests" />
             <input type="search" name="s" value="' . esc_attr( $search ) . '" placeholder="Search by rewards code or method" />
-            <button class="button">Search</button>
+            <select name="status">
+                <option value="">All statuses</option>
+                <option value="new"' . selected( $status, 'new', false ) . '>New</option>
+                <option value="pending"' . selected( $status, 'pending', false ) . '>Pending</option>
+                <option value="completed"' . selected( $status, 'completed', false ) . '>Completed</option>
+                <option value="cancelled"' . selected( $status, 'cancelled', false ) . '>Cancelled</option>
+                <option value="archived"' . selected( $status, 'archived', false ) . '>Archived</option>
+            </select>
+            <select name="type">
+                <option value="">All request types</option>
+                <option value="cash"' . selected( $type, 'cash', false ) . '>Cash</option>
+                <option value="service"' . selected( $type, 'service', false ) . '>Service</option>
+            </select>
+            <button class="button">Filter</button>
           </form>';
 
     echo '<table class="widefat striped">';
     echo '<thead><tr>
             <th>ID</th>
-            <th>Date</th>
+            <th>Requested On</th>
             <th>Rewards Code</th>
             <th>Amount</th>
-            <th>Type</th>
+            <th>Request Type</th>
             <th>Method</th>
             <th>Status</th>
+            <th>Paid At</th>
           </tr></thead><tbody>';
 
     if ( $rows ) {
@@ -5367,19 +6232,22 @@ global $wpdb;
                 admin_url( 'admin.php?page=dw-payout-requests&action=view&id=' . $r->id ),
                 'dw_view_payout_' . $r->id
             );
+            
+            $status_value = isset( $r->status ) ? $r->status : '';
 
             echo '<tr>
-                    <td><a href="' . esc_url( $view_url ) . '">' . esc_html( $r->id ) . '</a></td>
-                    <td>' . esc_html( $r->created_at ) . '</td>
+            <td><a href="' . esc_url( $view_url ) . '">' . esc_html( $r->id ) . '</a></td>
+                    <td>' . esc_html( $r->created_at ?? '—' ) . '</td>
                     <td><code>' . esc_html( $r->rewards_code ) . '</code></td>
                     <td>$' . esc_html( number_format( (float) $r->amount_requested, 2 ) ) . '</td>
-                    <td>' . esc_html( ucfirst( $r->request_type ) ) . '</td>
-                    <td>' . esc_html( ucfirst( $r->payout_method ) ) . '</td>
-                    <td>' . esc_html( $status_labels[ $r->status ] ?? $r->status ) . '</td>
+                    <td>' . esc_html( ucfirst( $r->request_type ?? '' ) ) . '</td>
+                    <td>' . esc_html( ucfirst( $r->payout_method ?? '' ) ) . '</td>
+                    <td>' . esc_html( $status_labels[ $status_value ] ?? $status_value ) . '</td>
+                    <td>' . esc_html( $r->paid_at ?? '—' ) . '</td>
                   </tr>';
         }
     } else {
-        echo '<tr><td colspan="7">No payout requests found.</td></tr>';
+        echo '<tr><td colspan="8">No payout requests found.</td></tr>';
     }
 
     echo '</tbody></table>';
@@ -5388,22 +6256,141 @@ global $wpdb;
     echo '</div>';
 }
 
+public function render_admin_rewards_payments() {
+    global $wpdb;
+
+    $map          = $this->get_payout_column_map();
+    $payout_table = $map['table'];
+    $members      = $wpdb->prefix . 'dw_rewards_members';
+
+    $exists = $wpdb->get_var(
+        $wpdb->prepare(
+            "SHOW TABLES LIKE %s",
+            $payout_table
+        )
+    );
+
+    if ( ! $exists ) {
+        echo '<div class="wrap"><h1>Rewards Payments</h1><p>Payout table not found yet. Once payout requests are stored, refresh this page.</p></div>';
+        return;
+    }
+
+    $member_col  = $map['member_id'];
+    $amount_col  = $map['amount'];
+    $status_col  = $map['status'];
+    $created_col = $map['created_at'];
+
+    if ( ! $member_col || ! $amount_col ) {
+        echo '<div class="wrap"><h1>Rewards Payments</h1><p>Required columns (member_id, amount) are missing, so totals cannot be summarized yet.</p></div>';
+        return;
+    }
+
+    $status_case    = $status_col ? "SUM(CASE WHEN {$status_col} = 'completed' THEN {$amount_col} ELSE 0 END) AS total_paid" : '0 AS total_paid';
+    $created_select = $created_col ? ", MAX({$created_col}) AS last_requested" : '';
+
+    $rows = $wpdb->get_results(
+        "SELECT {$member_col} AS member_id, SUM({$amount_col}) AS total_requested, {$status_case}{$created_select}
+         FROM {$payout_table}
+         GROUP BY {$member_col}
+         ORDER BY total_requested DESC"
+    );
+
+    echo '<div class="wrap"><h1>Rewards Payments</h1><p>Totals by member across payout requests.</p>';
+
+    if ( ! $rows ) {
+        echo '<p>No payout requests recorded yet.</p></div>';
+        return;
+    }
+
+    $member_ids = array_filter( wp_list_pluck( $rows, 'member_id' ) );
+    $lookup     = array();
+
+    if ( $member_ids ) {
+        $placeholders = implode( ', ', array_fill( 0, count( $member_ids ), '%d' ) );
+        $member_rows  = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT id, full_name, email, rewards_code FROM {$members} WHERE id IN ({$placeholders})",
+                $member_ids
+            )
+        );
+
+        foreach ( (array) $member_rows as $m ) {
+            $lookup[ $m->id ] = $m;
+        }
+    }
+
+    echo '<table class="widefat striped">';
+    echo '<thead><tr>
+            <th>Member</th>
+            <th>Total Requested</th>
+            <th>Total Paid</th>
+            <th>Outstanding</th>
+            <th>Last Requested</th>
+          </tr></thead><tbody>';
+
+    foreach ( $rows as $row ) {
+        $member_info = isset( $lookup[ $row->member_id ] ) ? $lookup[ $row->member_id ] : null;
+        $name        = $member_info ? $member_info->full_name : 'Member #' . (int) $row->member_id;
+        $email       = $member_info && $member_info->email ? $member_info->email : '';
+        $code        = $member_info && $member_info->rewards_code ? $member_info->rewards_code : '';
+
+        $requested   = isset( $row->total_requested ) ? (float) $row->total_requested : 0.0;
+        $paid        = isset( $row->total_paid ) ? (float) $row->total_paid : 0.0;
+        $outstanding = max( 0, $requested - $paid );
+        $last_req    = $created_col && isset( $row->last_requested ) ? $row->last_requested : '';
+
+        echo '<tr>';
+        echo '<td><strong>' . esc_html( $name ) . '</strong>';
+        if ( $email ) {
+            echo '<br /><a href="mailto:' . esc_attr( $email ) . '">' . esc_html( $email ) . '</a>';
+        }
+        if ( $code ) {
+            echo '<br /><code>' . esc_html( $code ) . '</code>';
+        }
+        echo '</td>';
+        echo '<td>$' . esc_html( number_format( $requested, 2 ) ) . '</td>';
+        echo '<td>$' . esc_html( number_format( $paid, 2 ) ) . '</td>';
+        echo '<td>$' . esc_html( number_format( $outstanding, 2 ) ) . '</td>';
+        echo '<td>' . ( $last_req ? esc_html( $last_req ) : '—' ) . '</td>';
+        echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+    echo '</div>';
+}
+
 
 
 
 private function render_admin_payout_request_detail( $id ) {
     global $wpdb;
-    // Use the actual table name you confirmed:
-    $table   = $this->get_payout_table_name();
+
+    $map     = $this->get_payout_column_map();
+    $table   = $map['table'];
     $members = $wpdb->prefix . 'dw_rewards_members';
 
-    // On the initial GET of the page, verify the "view" nonce.
-    if ( $_SERVER['REQUEST_METHOD'] === 'GET' ) {
-        check_admin_referer( 'dw_view_payout_' . $id );
+    if ( empty( $map['exists'] ) ) {
+        echo '<div class="wrap"><h1>Payout Request</h1><p>Payout table not found.</p></div>';
+        return;
     }
 
+    $id = absint( $id );
+    if ( ! $id ) {
+        echo '<div class="wrap"><h1>Payout Request</h1><p>Request not found.</p></div>';
+        return;
+    }
+
+    // For the initial GET view, validate the "view" nonce.
+    if ( 'POST' !== $_SERVER['REQUEST_METHOD'] ) {
+        check_admin_referer( 'dw_view_payout_' . $id );
+    }
+    // On the initial GET of the page, verify the "view" nonce.
+   // if ( $_SERVER['REQUEST_METHOD'] === 'GET' ) {
+     //   check_admin_referer( 'dw_view_payout_' . $id );
+   // }
+
     // Always fetch the row by the ID we're passed in the URL.
-    $row = $wpdb->get_row(
+      $row = $wpdb->get_row(
         $wpdb->prepare(
             "SELECT p.*, m.full_name, m.email
              FROM {$table} p
@@ -5424,6 +6411,11 @@ private function render_admin_payout_request_detail( $id ) {
     $status_field = isset( $columns_raw['status'] ) ? 'status' : ( isset( $columns_raw['payout_status'] ) ? 'payout_status' : '' );
     $notes_field  = isset( $columns_raw['admin_notes'] ) ? 'admin_notes' : ( isset( $columns_raw['notes'] ) ? 'notes' : '' );
     $paid_at_key  = isset( $columns_raw['paid_at'] ) ? 'paid_at' : ( isset( $columns_raw['paid_date'] ) ? 'paid_date' : '' );
+ 
+    $status_field  = $map['status'];
+    $notes_field   = $map['notes'];
+    $paid_at_key   = $map['paid_at'];
+    $updated_field = $map['updated_at'];
 
     $status_options = array(
         'new'       => 'New',
@@ -5439,7 +6431,7 @@ private function render_admin_payout_request_detail( $id ) {
         // Check the UPDATE nonce (different from the view nonce)
         check_admin_referer( 'dw_update_payout_' . $row->id );
 
-         $new_status = isset( $_POST['status'] )
+     $new_status = isset( $_POST['status'] )
             ? sanitize_text_field( wp_unslash( $_POST['status'] ) )
             : ( $status_field && isset( $row->{$status_field} ) ? $row->{$status_field} : '' );
 
@@ -5459,24 +6451,24 @@ private function render_admin_payout_request_detail( $id ) {
         $update_data    = array();
         $update_formats = array();
 
-        if ( $status_field && isset( $columns_raw[ $status_field ] ) ) {
+        if ( $status_field ) {
             $update_data[ $status_field ] = $new_status;
             $update_formats[]             = '%s';
         }
 
-        if ( $notes_field && isset( $columns_raw[ $notes_field ] ) ) {
+        if ( $notes_field ) {
             $update_data[ $notes_field ] = $notes;
             $update_formats[]           = '%s';
         }
 
-        if ( $paid_at_key && isset( $columns_raw[ $paid_at_key ] ) ) {
+        if ( $paid_at_key ) {
             $update_data[ $paid_at_key ] = $paid_at;
             $update_formats[]            = '%s';
         }
 
-        if ( isset( $columns_raw['updated_at'] ) ) {
-            $update_data['updated_at'] = current_time( 'mysql' );
-            $update_formats[]          = '%s';
+        if ( $updated_field ) {
+            $update_data[ $updated_field ] = current_time( 'mysql' );
+            $update_formats[]              = '%s';
         }
 
         if ( $update_data ) {
@@ -5488,6 +6480,7 @@ private function render_admin_payout_request_detail( $id ) {
                 array( '%d' )
             );
         }
+        
 
         // After saving, redirect back to the same detail page
         // with a fresh "view" nonce and ?updated=1 flag.
@@ -5504,7 +6497,27 @@ private function render_admin_payout_request_detail( $id ) {
     $current_status  = $status_field && isset( $row->{$status_field} ) ? $row->{$status_field} : '';
     $current_notes   = $notes_field && isset( $row->{$notes_field} ) ? $row->{$notes_field} : '';
 
+   $rewards_code_value = $map['rewards_code'] && isset( $row->{$map['rewards_code']} )
+        ? $row->{$map['rewards_code']}
+        : ( isset( $row->rewards_code ) ? $row->rewards_code : '' );
+    $amount_value       = $map['amount'] && isset( $row->{$map['amount']} )
+        ? $row->{$map['amount']}
+        : ( isset( $row->amount_requested ) ? $row->amount_requested : 0 );
+    $request_type_value = $map['request_type'] && isset( $row->{$map['request_type']} )
+        ? $row->{$map['request_type']}
+        : ( isset( $row->request_type ) ? $row->request_type : '' );
+    $method_value       = $map['payout_method'] && isset( $row->{$map['payout_method']} )
+        ? $row->{$map['payout_method']}
+        : ( isset( $row->payout_method ) ? $row->payout_method : '' );
+    $details_value      = $map['details'] && isset( $row->{$map['details']} )
+        ? $row->{$map['details']}
+        : ( isset( $row->payout_details ) ? $row->payout_details : '' );
+    $created_value      = $map['created_at'] && isset( $row->{$map['created_at']} )
+        ? $row->{$map['created_at']}
+        : ( isset( $row->created_at ) ? $row->created_at : '' );
+
     echo '<div class="wrap"><h1>Payout Request #' . esc_html( $row->id ) . '</h1>';
+    ?>
 
     // Show success notice after redirect
     if ( isset( $_GET['updated'] ) ) {
@@ -5522,32 +6535,32 @@ private function render_admin_payout_request_detail( $id ) {
             <td><?php echo esc_html( $row->email ?: '—' ); ?></td>
         </tr>
         <tr>
-            <th scope="row">Rewards Code</th>
-            <td><code><?php echo esc_html( $row->rewards_code ); ?></code></td>
+            <th scope="row">Rewards Code</th>␊
+            <td><code><?php echo esc_html( $rewards_code_value ); ?></code></td>
         </tr>
         <tr>
-            <th scope="row">Amount Requested</th>
-            <td>$<?php echo esc_html( number_format( (float) $row->amount_requested, 2 ) ); ?></td>
+            <th scope="row">Amount Requested</th>␊
+            <td>$<?php echo esc_html( number_format( (float) $amount_value, 2 ) ); ?></td>
         </tr>
         <tr>
-            <th scope="row">Request Type</th>
-            <td><?php echo esc_html( ucfirst( $row->request_type ) ); ?></td>
+            <th scope="row">Request Type</th>␊
+            <td><?php echo esc_html( ucfirst( $request_type_value ) ); ?></td>
         </tr>
         <tr>
-            <th scope="row">Payout Method</th>
-            <td><?php echo esc_html( ucfirst( $row->payout_method ) ); ?></td>
+            <th scope="row">Payout Method</th>␊
+            <td><?php echo esc_html( ucfirst( $method_value ) ); ?></td>
         </tr>
         <tr>
-            <th scope="row">Payout Details</th>
-            <td><?php echo nl2br( esc_html( $row->payout_details ) ); ?></td>
+            <th scope="row">Payout Details</th>␊
+            <td><?php echo nl2br( esc_html( $details_value ) ); ?></td>
         </tr>
         <tr>
-            <th scope="row">Created</th>
-            <td><?php echo esc_html( $row->created_at ); ?></td>
+            <th scope="row">Created</th>␊
+            <td><?php echo esc_html( $created_value ); ?></td>
         </tr>
         <tr>
-            <th scope="row">Paid At</th>
-            <td><?php echo $rpaid_at_value ? esc_html( $paid_at_value ) : '—'; ?></td>
+            <th scope="row">Paid At</th>␊
+            <td><?php echo $paid_at_value ? esc_html( $paid_at_value ) : '—'; ?></td>
         </tr>
         <tr>
             <th scope="row">Current Status</th>
@@ -5577,7 +6590,7 @@ private function render_admin_payout_request_detail( $id ) {
                     <textarea id="dw_payout_notes"
                               name="admin_notes"
                               rows="5"
-                              class="large-text"><?php echo esc_textarea( $row->admin_notes ); ?></textarea>
+                              class="large-text"><?php echo esc_textarea( $current_notes); ?></textarea>
                 </td>
             </tr>
         </table>
